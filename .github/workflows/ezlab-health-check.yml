@@ -1,0 +1,35 @@
+name: 이지랩 헬스체크
+
+on:
+  schedule:
+    - cron: '0 0 * * *'  # 매일 오전 9시 (한국시간 = UTC 0시)
+  workflow_dispatch:      # 수동 실행 버튼도 활성화
+
+jobs:
+  health-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Node.js 설정
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 패키지 설치
+        run: npm ci
+
+      - name: Playwright 브라우저 설치
+        run: npx playwright install --with-deps chromium firefox webkit
+
+      - name: 테스트 실행
+        run: npx playwright test tests/ezlab.spec.ts --reporter=html
+        continue-on-error: true
+
+      - name: GitHub Pages 배포
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./playwright-report
