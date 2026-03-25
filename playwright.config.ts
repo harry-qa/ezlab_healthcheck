@@ -31,8 +31,8 @@ export default defineConfig({
     /* Collect trace when retrying the failed test. See https://playwright.dev/docs/trace-viewer */
     trace: 'on-first-retry',
 
-    /* 실제 브라우저 창을 열어서 테스트 실행 */
-    headless: false,
+    /* 로컬: 브라우저 창 열림 / CI: headless 실행 */
+    headless: process.env.CI ? true : false,
   },
 
   /* Configure projects for major browsers */
