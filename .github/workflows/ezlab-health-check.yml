@@ -2,8 +2,11 @@ name: 이지랩 헬스체크
 
 on:
   schedule:
-    - cron: '0 0 * * *'  # 매일 오전 9시 (한국시간 = UTC 0시)
-  workflow_dispatch:      # 수동 실행 버튼도 활성화
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   health-check:
@@ -16,7 +19,7 @@ jobs:
       - name: Node.js 설정
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
       - name: 패키지 설치
         run: npm ci
