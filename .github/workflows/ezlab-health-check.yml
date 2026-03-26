@@ -38,7 +38,7 @@ jobs:
           DATE=$(date +'%Y-%m-%d')
           mkdir -p reports/$DATE
           cp -r playwright-report/. reports/$DATE/
-          echo "<meta http-equiv='refresh' content='0; url=reports/$DATE/'>" > reports/index.html
+          echo "<meta http-equiv='refresh' content='0; url=$DATE/'>" > reports/index.html
 
       - name: GitHub Pages 배포
         uses: peaceiris/actions-gh-pages@v3
