@@ -300,6 +300,30 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
           } else {
             passCount++;
             console.log(`[PASS][다운로드][${target.name}] ${status} (${responseTime}ms) 다운로드 버튼 확인 ${target.url}`);
+
+            // 실제 파일 URL HEAD 요청으로 파일 존재 확인
+            const fileLinks = await page.locator('a[href*=".exe"], a[href*=".apk"], a[href*=".zip"]').all();
+            for (const link of fileLinks) {
+              const href = await link.getAttribute('href');
+              if (!href) continue;
+              const fileUrl = href.startsWith('http') ? href : baseUrl + href;
+              try {
+                const fileRes = await request.head(fileUrl, { timeout: 8000 });
+                const fileStatus = fileRes.status();
+                if (fileStatus === 200 || fileStatus === 206) {
+                  passCount++;
+                  console.log(`[PASS][파일][${target.name}] ${fileStatus} ${fileUrl}`);
+                } else {
+                  warnCount++;
+                  const ts = kstNow();
+                  console.log(`[WARN][파일][${target.name}] ${fileStatus} 파일 응답 이상 ${fileUrl}`);
+                  failRecords.push({ step: 'STEP4·파일URL', type: '파일', lang: 'ko', url: fileUrl, status: fileStatus, responseTime: 0, symptom: `파일 응답 이상 (${fileStatus})`, timestamp: ts });
+                }
+              } catch {
+                warnCount++;
+                console.log(`[WARN][파일][${target.name}] 파일 접근 불가: ${fileUrl}`);
+              }
+            }
           }
         } catch (e) {
           failCount++;
@@ -351,6 +375,92 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
         }
       });
     }
+  });
+
+
+  // ══════════════════════════════════════════════════════════════════
+  // STEP 6: 깨진 이미지 감지
+  // ══════════════════════════════════════════════════════════════════
+  await test.step('STEP 6 · 깨진 이미지 감지 (ko / en / jp)', async () => {
+    for (const lang of languages) {
+      await test.step(`[${lang}] <img> 이미지 점검`, async () => {
+        try {
+          await page.goto(`${baseUrl}/${lang}`, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        } catch {
+          console.log(`[SKIP][${lang}] 페이지 진입 실패`);
+          return;
+        }
+
+        const images = await page.locator('img').all();
+        console.log(`[INFO][${lang}] 총 ${images.length}개 이미지 발견`);
+
+        for (const img of images) {
+          const src = await img.getAttribute('src');
+          if (!src || src.startsWith('data:') || src.startsWith('blob:') || src.includes('/_next/image')) continue; // Next.js 이미지 프록시는 쿼리 파라미터 필수라 스킵
+
+          const imgUrl = src.startsWith('http') ? src : baseUrl + (src.startsWith('/') ? src : '/' + src);
+          const cleanSrc = imgUrl.split('?')[0];
+          if (visitedUrls.has(cleanSrc)) continue;
+          visitedUrls.add(cleanSrc);
+
+          try {
+            const res = await page.request.get(cleanSrc, { headers, timeout: 8000 });
+            const imgStatus = res.status();
+            if (imgStatus !== 200) {
+              warnCount++;
+              const ts = kstNow();
+              console.log(`[WARN][이미지][${lang}] ${imgStatus} 깨진 이미지: ${cleanSrc}`);
+              failRecords.push({ step: 'STEP6·이미지', type: '이미지', lang, url: cleanSrc, status: imgStatus, responseTime: 0, symptom: `이미지 로드 실패 (${imgStatus})`, timestamp: ts });
+            } else {
+              passCount++;
+              console.log(`[PASS][이미지][${lang}] ${imgStatus} ${cleanSrc}`);
+            }
+          } catch {
+            warnCount++;
+            console.log(`[WARN][이미지][${lang}] 접근 불가: ${cleanSrc}`);
+          }
+        }
+      });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // STEP 7: 로그인 폼 렌더링 확인
+  // ══════════════════════════════════════════════════════════════════
+  await test.step('STEP 7 · 로그인 폼 렌더링 확인', async () => {
+    await test.step('[로그인] 폼 요소 존재 확인', async () => {
+      const loginUrl = `${baseUrl}/ko/login`;
+      try {
+        await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+
+        // 소셜 로그인 페이지: 카카오/네이버/구글 버튼 존재 확인
+        const kakaoBtn  = await page.locator('button:has-text("카카오")').count();
+        const naverBtn  = await page.locator('button:has-text("네이버")').count();
+        const googleBtn = await page.locator('button:has-text("구글")').count();
+        const formOk    = kakaoBtn > 0 && naverBtn > 0 && googleBtn > 0;
+
+        if (!formOk) {
+          warnCount++;
+          const missing = [
+            kakaoBtn  === 0 ? '카카오 로그인' : '',
+            naverBtn  === 0 ? '네이버 로그인' : '',
+            googleBtn === 0 ? '구글 로그인'   : '',
+          ].filter(Boolean).join(', ');
+          const ts = kstNow();
+          console.log(`[WARN][로그인] 소셜 버튼 미감지: ${missing} @ ${ts}`);
+          failRecords.push({ step: 'STEP7·로그인폼', type: '로그인', lang: 'ko', url: loginUrl, status: 200, responseTime: 0, symptom: `소셜 버튼 미감지: ${missing}`, timestamp: ts });
+        } else {
+          passCount++;
+          console.log(`[PASS][로그인] 카카오 / 네이버 / 구글 로그인 버튼 모두 확인`);
+        }
+      } catch {
+        failCount++;
+        const ts = kstNow();
+        console.log(`[ERROR][로그인] 페이지 진입 실패: ${loginUrl} @ ${ts}`);
+        failRecords.push({ step: 'STEP7·로그인폼', type: '로그인', lang: 'ko', url: loginUrl, status: 0, responseTime: 0, symptom: '페이지 진입 실패', timestamp: ts });
+        expect.soft(null, '[로그인] 페이지 진입 실패').not.toBeNull();
+      }
+    });
   });
 
   // ══════════════════════════════════════════════════════════════════
