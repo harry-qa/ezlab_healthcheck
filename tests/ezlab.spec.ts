@@ -32,8 +32,16 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
     jp: ['ダウンロード', 'ezcapture', 'ezzip'],  // toLowerCase() 비교 기준으로 소문자 통일
   };
 
-  type ApiRecord = { url: string; method: string; status: number; time: number; note: string };
-  const apiRecords: ApiRecord[] = [];
+  type ApiRecord  = { url: string; method: string; status: number; time: number; note: string };
+  type FailRecord = { step: string; type: string; lang: string; url: string; status: number; responseTime: number; symptom: string; timestamp: string };
+
+  const apiRecords: ApiRecord[]  = [];
+  const failRecords: FailRecord[] = [];
+
+  // ── KST 타임스탬프 헬퍼 ─────────────────────────────────────────
+  function kstNow() {
+    return new Date().toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', hour12: false });
+  }
 
   // ── 결과 카운터 (배지용) ────────────────────────────────────────
   let passCount = 0;
@@ -78,7 +86,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
 
       if (result === 'FAIL') {
         failCount++;
-        console.log(`[FAIL][${type}][${lang}] ${status} (${responseTime}ms) ${cleanUrl}`);
+        const ts = kstNow();
+        console.log(`[FAIL][${type}][${lang}] ${status} (${responseTime}ms) ${cleanUrl} @ ${ts}`);
+        failRecords.push({ step: 'UI/링크', type, lang, url: cleanUrl, status, responseTime, symptom: noteStr, timestamp: ts });
         expect.soft(status, `[${type}][${lang}] ${noteStr} → ${cleanUrl}`).toBe(200);
       } else if (result === 'SLOW') {
         warnCount++;
@@ -95,7 +105,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
     } catch (e) {
       if (isInternal) {
         failCount++;
-        console.log(`[ERROR][${type}][${lang}] 접속 불가: ${cleanUrl}`);
+        const ts = kstNow();
+        console.log(`[ERROR][${type}][${lang}] 접속 불가: ${cleanUrl} @ ${ts}`);
+        failRecords.push({ step: 'UI/링크', type, lang, url: cleanUrl, status: 0, responseTime: 0, symptom: '접속 불가 / 타임아웃', timestamp: ts });
         expect.soft(null, `[${type}][${lang}] 접속 불가/타임아웃 → ${cleanUrl}`).not.toBeNull();
       } else {
         warnCount++;
@@ -118,12 +130,21 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
           const responseTime = Date.now() - startTime;
           const status = res.status();
 
-          if (status === 200) passCount++; else failCount++;
-          console.log(`[${status === 200 ? 'PASS' : 'FAIL'}][${lang}] 서버 ${status} (${responseTime}ms)`);
+          if (status === 200) {
+            passCount++;
+            console.log(`[PASS][${lang}] 서버 ${status} (${responseTime}ms)`);
+          } else {
+            failCount++;
+            const ts = kstNow();
+            console.log(`[FAIL][${lang}] 서버 ${status} (${responseTime}ms) @ ${ts}`);
+            failRecords.push({ step: 'STEP1·서버생존', type: '서버', lang, url: serverUrl, status, responseTime, symptom: `HTTP ${status} 응답`, timestamp: ts });
+          }
           expect.soft(status, `상태코드 확인 (status: ${status}, url: ${serverUrl})`).toBe(200);
         } catch {
           failCount++;
-          console.log(`[ERROR][${lang}] 서버 접속 불가`);
+          const ts = kstNow();
+          console.log(`[ERROR][${lang}] 서버 접속 불가 @ ${ts}`);
+          failRecords.push({ step: 'STEP1·서버생존', type: '서버', lang, url: serverUrl, status: 0, responseTime: 0, symptom: '접속 불가 / 타임아웃', timestamp: ts });
           expect.soft(null, `접속 불가 (url: ${serverUrl})`).not.toBeNull();
         }
       });
@@ -193,7 +214,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
 
         if (isFail) {
           failCount++;
-          console.log(`[FAIL] ${label}`);
+          const ts = kstNow();
+          console.log(`[FAIL] ${label} @ ${ts}`);
+          failRecords.push({ step: 'STEP2·API', type: 'API', lang: '-', url: rec.url, status: rec.status, responseTime: rec.time, symptom: rec.note, timestamp: ts });
           expect.soft(rec.status, label).toBeLessThan(500);
         } else {
           passCount++;
@@ -267,7 +290,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
 
           if (status !== 200) {
             failCount++;
-            console.log(`[FAIL][다운로드][${target.name}] ${status} (${responseTime}ms) ${target.url}`);
+            const ts = kstNow();
+            console.log(`[FAIL][다운로드][${target.name}] ${status} (${responseTime}ms) ${target.url} @ ${ts}`);
+            failRecords.push({ step: 'STEP4·다운로드', type: '다운로드', lang: 'ko', url: target.url, status, responseTime, symptom: `HTTP ${status} 응답`, timestamp: ts });
             expect.soft(status, `[다운로드][${target.name}] 페이지 응답 실패 → ${target.url}`).toBe(200);
           } else if (!hasDownloadLink) {
             warnCount++;
@@ -278,7 +303,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
           }
         } catch (e) {
           failCount++;
-          console.log(`[ERROR][다운로드][${target.name}] 접속 불가: ${target.url}`);
+          const ts = kstNow();
+          console.log(`[ERROR][다운로드][${target.name}] 접속 불가: ${target.url} @ ${ts}`);
+          failRecords.push({ step: 'STEP4·다운로드', type: '다운로드', lang: 'ko', url: target.url, status: 0, responseTime: 0, symptom: '접속 불가 / 타임아웃', timestamp: ts });
           expect.soft(null, `[다운로드][${target.name}] 접속 불가/타임아웃 → ${target.url}`).not.toBeNull();
         }
       });
@@ -306,8 +333,10 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
 
           if (missingKeywords.length > 0) {
             failCount++;
+            const ts = kstNow();
             const msg = `[콘텐츠][${lang}] 누락 키워드: ${missingKeywords.join(', ')}`;
-            console.log(`[FAIL] ${msg}`);
+            console.log(`[FAIL] ${msg} @ ${ts}`);
+            failRecords.push({ step: 'STEP5·콘텐츠', type: '콘텐츠', lang, url: targetUrl, status: 200, responseTime: 0, symptom: `누락 키워드: ${missingKeywords.join(', ')}`, timestamp: ts });
             expect.soft(missingKeywords.length, msg).toBe(0);
           } else {
             passCount++;
@@ -315,7 +344,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
           }
         } catch {
           failCount++;
-          console.log(`[ERROR][콘텐츠][${lang}] 페이지 진입 실패: ${targetUrl}`);
+          const ts = kstNow();
+          console.log(`[ERROR][콘텐츠][${lang}] 페이지 진입 실패: ${targetUrl} @ ${ts}`);
+          failRecords.push({ step: 'STEP5·콘텐츠', type: '콘텐츠', lang, url: targetUrl, status: 0, responseTime: 0, symptom: '페이지 진입 실패', timestamp: ts });
           expect.soft(null, `[콘텐츠][${lang}] 페이지 진입 실패`).not.toBeNull();
         }
       });
@@ -328,6 +359,45 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   const totalCount = passCount + failCount + warnCount;
   const status = failCount > 0 ? 'FAIL' : warnCount > 0 ? 'WARN' : 'PASS';
   const color = failCount > 0 ? 'red' : warnCount > 0 ? 'yellow' : 'brightgreen';
+  const checkTime = kstNow();
+
+  // ── 장애 상세 리포트 첨부 (FAIL 있을 때만) ─────────────────────
+  if (failRecords.length > 0) {
+    const affectedTypes = [...new Set(failRecords.map(r => r.type))].join(', ');
+    const sep  = '═'.repeat(60);
+    const sep2 = '─'.repeat(60);
+    const failLines = failRecords.map((r, i) => [
+      `[${i + 1}] ${r.step} · ${r.type} · 언어: ${r.lang}`,
+      `    발생 시각 : ${r.timestamp}`,
+      `    URL       : ${r.url}`,
+      `    상태코드  : ${r.status === 0 ? '응답 없음' : String(r.status)}`,
+      `    응답 시간 : ${r.responseTime === 0 ? '-' : r.responseTime + 'ms'}`,
+      `    증상      : ${r.symptom}`,
+    ].join('\n')).join('\n\n');
+
+    const incidentReport = [
+      sep,
+      '이지랩 헬스체크 장애 리포트',
+      `점검 시각  : ${checkTime}`,
+      sep2,
+      '장애 요약',
+      `  - 총 FAIL  : ${failCount}건`,
+      `  - 영향 범위: ${affectedTypes}`,
+      sep2,
+      '실패 항목 상세',
+      '',
+      failLines,
+      '',
+      sep2,
+      `전체 결과  : PASS ${passCount} / FAIL ${failCount} / WARN ${warnCount} / TOTAL ${totalCount}`,
+      sep,
+    ].join('\n');
+
+    await test.info().attach('장애 리포트', {
+      body: incidentReport,
+      contentType: 'text/plain; charset=utf-8'
+    });
+  }
 
   const badgeData = {
     schemaVersion: 1,
