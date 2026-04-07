@@ -44,6 +44,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   }
 
   // ── 결과 카운터 (배지용) ────────────────────────────────────────
+  const testStartTime = Date.now();
   let passCount = 0;
   let failCount = 0;
   let warnCount = 0;
@@ -296,6 +297,8 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
             expect.soft(status, `[다운로드][${target.name}] 페이지 응답 실패 → ${target.url}`).toBe(200);
           } else if (!hasDownloadLink) {
             warnCount++;
+            const ssWarn = await page.screenshot({ fullPage: false });
+            await test.info().attach(`스크린샷_다운로드_${target.name}`, { body: ssWarn, contentType: 'image/png' });
             console.log(`[WARN][다운로드][${target.name}] 페이지 정상이나 다운로드 버튼 미감지 ${target.url}`);
           } else {
             passCount++;
@@ -358,6 +361,8 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
           if (missingKeywords.length > 0) {
             failCount++;
             const ts = kstNow();
+            const ssContent = await page.screenshot({ fullPage: false });
+            await test.info().attach(`스크린샷_콘텐츠_${lang}`, { body: ssContent, contentType: 'image/png' });
             const msg = `[콘텐츠][${lang}] 누락 키워드: ${missingKeywords.join(', ')}`;
             console.log(`[FAIL] ${msg} @ ${ts}`);
             failRecords.push({ step: 'STEP5·콘텐츠', type: '콘텐츠', lang, url: targetUrl, status: 200, responseTime: 0, symptom: `누락 키워드: ${missingKeywords.join(', ')}`, timestamp: ts });
@@ -441,6 +446,8 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
 
         if (!formOk) {
           warnCount++;
+          const ssLogin = await page.screenshot({ fullPage: false });
+          await test.info().attach('스크린샷_로그인폼', { body: ssLogin, contentType: 'image/png' });
           const missing = [
             kakaoBtn  === 0 ? '카카오 로그인' : '',
             naverBtn  === 0 ? '네이버 로그인' : '',
@@ -471,39 +478,101 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   const color = failCount > 0 ? 'red' : warnCount > 0 ? 'yellow' : 'brightgreen';
   const checkTime = kstNow();
 
-  // ── 장애 상세 리포트 첨부 (FAIL 있을 때만) ─────────────────────
+  const duration  = Math.round((Date.now() - testStartTime) / 1000);
+  const sep       = '═'.repeat(64);
+  const sep2      = '─'.repeat(64);
+
+  // ── 전체 점검 요약 (항상 첨부) ─────────────────────────────────
+  const summaryLines = [
+    sep,
+    '이지랩 헬스체크 · 전체 점검 요약',
+    `실행 시각 : ${checkTime} (KST)`,
+    `소요 시간 : ${duration}초`,
+    sep2,
+    '[전체 결과]',
+    `  PASS ${passCount}  /  FAIL ${failCount}  /  WARN ${warnCount}  /  TOTAL ${totalCount}`,
+    sep2,
+    '[점검 범위]',
+    `  페이지 / 링크 : ${visitedUrls.size}개`,
+    `  API           : ${apiRecords.length}개`,
+    sep2,
+    '[STEP별 상태]',
+    `  STEP 1 · 서버 생존 확인 (ko/en/jp)`,
+    `  STEP 2 · API 자동 수집 및 검증 (${apiRecords.length}건)`,
+    `  STEP 3 · UI 링크 전수조사`,
+    `  STEP 4 · 다운로드 페이지 + 실제 파일 URL 검증`,
+    `  STEP 5 · 언어별 핵심 콘텐츠 무결성 확인`,
+    `  STEP 6 · 깨진 이미지 감지`,
+    `  STEP 7 · 소셜 로그인 버튼 렌더링 확인`,
+  ];
+
   if (failRecords.length > 0) {
     const affectedTypes = [...new Set(failRecords.map(r => r.type))].join(', ');
-    const sep  = '═'.repeat(60);
-    const sep2 = '─'.repeat(60);
+    summaryLines.push(sep2);
+    summaryLines.push(`[장애 항목]  영향 범위: ${affectedTypes}`);
+    failRecords.forEach((r, i) => {
+      summaryLines.push('');
+      summaryLines.push(`  [${i + 1}] ${r.step}  |  ${r.type}  |  언어: ${r.lang}`);
+      summaryLines.push(`       발생 시각 : ${r.timestamp}`);
+      summaryLines.push(`       URL       : ${r.url}`);
+      summaryLines.push(`       상태코드  : ${r.status === 0 ? '응답 없음 (타임아웃)' : String(r.status)}`);
+      summaryLines.push(`       응답 시간 : ${r.responseTime === 0 ? '-' : r.responseTime + 'ms'}`);
+      summaryLines.push(`       증상      : ${r.symptom}`);
+      summaryLines.push(`       기대값    : HTTP 200 OK`);
+    });
+  }
+
+  summaryLines.push(sep);
+
+  await test.info().attach('전체 점검 요약', {
+    body: summaryLines.join('\n'),
+    contentType: 'text/plain; charset=utf-8'
+  });
+
+  // ── 장애 리포트 (FAIL/WARN 있을 때 개발팀 전달용) ───────────────
+  if (failRecords.length > 0) {
+    const affectedTypes = [...new Set(failRecords.map(r => r.type))].join(', ');
     const failLines = failRecords.map((r, i) => [
-      `[${i + 1}] ${r.step} · ${r.type} · 언어: ${r.lang}`,
+      `[${i + 1}] ${r.step}  |  유형: ${r.type}  |  언어: ${r.lang}`,
       `    발생 시각 : ${r.timestamp}`,
       `    URL       : ${r.url}`,
-      `    상태코드  : ${r.status === 0 ? '응답 없음' : String(r.status)}`,
+      `    상태코드  : ${r.status === 0 ? '응답 없음 (타임아웃)' : String(r.status)}`,
       `    응답 시간 : ${r.responseTime === 0 ? '-' : r.responseTime + 'ms'}`,
       `    증상      : ${r.symptom}`,
+      `    기대값    : HTTP 200 OK`,
+      `    조치 필요 : ${
+        r.type === '서버'    ? '서버/인프라 팀 확인 요청' :
+        r.type === 'API'     ? '백엔드 팀 확인 요청' :
+        r.type === '다운로드' ? '다운로드 링크 및 파일 서버 확인' :
+        r.type === '파일'    ? '파일 서버 / CDN 확인' :
+        r.type === '콘텐츠'  ? '프론트엔드 배포 확인' :
+        r.type === '이미지'  ? '이미지 서버 / CDN 확인' :
+        r.type === '로그인'  ? '로그인 페이지 렌더링 확인' : '담당팀 확인 요청'
+      }`,
     ].join('\n')).join('\n\n');
 
     const incidentReport = [
       sep,
-      '이지랩 헬스체크 장애 리포트',
-      `점검 시각  : ${checkTime}`,
+      '이지랩 헬스체크 · 장애 리포트  ※ 개발팀 전달용',
+      `실행 시각  : ${checkTime} (KST)`,
+      `소요 시간  : ${duration}초`,
       sep2,
-      '장애 요약',
-      `  - 총 FAIL  : ${failCount}건`,
-      `  - 영향 범위: ${affectedTypes}`,
+      '[장애 요약]',
+      `  총 FAIL   : ${failCount}건`,
+      `  총 WARN   : ${warnCount}건`,
+      `  영향 범위 : ${affectedTypes}`,
       sep2,
-      '실패 항목 상세',
+      '[장애 상세]',
       '',
       failLines,
       '',
       sep2,
       `전체 결과  : PASS ${passCount} / FAIL ${failCount} / WARN ${warnCount} / TOTAL ${totalCount}`,
+      '※ 스크린샷은 리포트 첨부 파일에서 확인하세요.',
       sep,
     ].join('\n');
 
-    await test.info().attach('장애 리포트', {
+    await test.info().attach('장애 리포트 (개발팀 전달용)', {
       body: incidentReport,
       contentType: 'text/plain; charset=utf-8'
     });
