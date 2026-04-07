@@ -58,38 +58,13 @@ jobs:
           sort -r /tmp/runs.txt | uniq | head -180 > /tmp/all_runs.txt
 
           git show origin/gh-pages:statuses.json > /tmp/statuses.json 2>/dev/null || echo '{}' > /tmp/statuses.json
+          git show origin/gh-pages:perf-history.json > /tmp/perf-history.json 2>/dev/null || echo '{}' > /tmp/perf-history.json
 
           CURRENT_STATUS=$(python3 -c "import json; d=json.load(open('report-status.json')); print(d.get('status','UNKNOWN'))" 2>/dev/null || echo "UNKNOWN")
           echo "HEALTH_STATUS=$CURRENT_STATUS" >> $GITHUB_ENV
 
-          python3 -c "
-import json, sys
-with open('/tmp/statuses.json') as f:
-    s = json.load(f)
-s[sys.argv[1]] = sys.argv[2]
-keys = sorted(s.keys(), reverse=True)[:180]
-s = {k: s[k] for k in keys}
-with open('/tmp/statuses.json', 'w') as f:
-    json.dump(s, f)
-" "$DATETIME" "$CURRENT_STATUS"
-
-          git show origin/gh-pages:perf-history.json > /tmp/perf-history.json 2>/dev/null || echo '{}' > /tmp/perf-history.json
-
-          python3 -c "
-import json, sys
-with open('/tmp/perf-history.json') as f:
-    h = json.load(f)
-try:
-    with open('report-status.json') as f:
-        d = json.load(f)
-    h[sys.argv[1]] = {'serverTimes': d.get('serverTimes', {})}
-except Exception:
-    h[sys.argv[1]] = {}
-keys = sorted(h.keys(), reverse=True)[:180]
-h = {k: h[k] for k in keys}
-with open('/tmp/perf-history.json', 'w') as f:
-    json.dump(h, f)
-" "$DATETIME"
+          python3 scripts/update_statuses.py "$DATETIME" "$CURRENT_STATUS"
+          python3 scripts/update_perf.py "$DATETIME"
 
           cp /tmp/statuses.json reports/statuses.json
           cp /tmp/perf-history.json reports/perf-history.json
