@@ -1,22 +1,37 @@
 import sys
 import re
+from collections import defaultdict
 
-dates_file = sys.argv[1]
-current_date = sys.argv[2]
+runs_file   = sys.argv[1]
+current_run = sys.argv[2]   # e.g. "2026-04-07_09-00"
 output_file = sys.argv[3]
 
-with open(dates_file) as f:
-    dates = sorted(
-        {d.strip() for d in f if re.match(r'^\d{4}-\d{2}-\d{2}$', d.strip())},
+with open(runs_file) as f:
+    entries = sorted(
+        {d.strip() for d in f if re.match(r'^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}$', d.strip())},
         reverse=True
     )
 
+# 날짜별 그룹핑
+grouped = defaultdict(list)
+for entry in entries:
+    date, time_str = entry.split('_')
+    grouped[date].append((entry, time_str.replace('-', ':')))
+
+sorted_dates = sorted(grouped.keys(), reverse=True)
+
 rows = ""
-for d in dates:
-    is_new = d == current_date
-    badge = '<span class="badge-new">최신</span>' if is_new else ''
-    row_class = ' class="row-new"' if is_new else ''
-    rows += f'<tr{row_class}><td><a href="{d}/">{d}</a></td><td>{badge}</td></tr>\n'
+for date in sorted_dates:
+    runs = grouped[date]
+    rows += f'<tr class="date-header"><td colspan="3">{date}</td></tr>\n'
+    for entry, time_display in runs:
+        is_new = entry == current_run
+        badge = '<span class="badge-new">최신</span>' if is_new else ''
+        row_class = ' class="row-new"' if is_new else ''
+        rows += f'<tr{row_class}><td class="time-cell"><a href="{entry}/">{time_display}</a></td><td>{badge}</td></tr>\n'
+
+cur_date, cur_time = current_run.split('_')
+cur_display = f"{cur_date} {cur_time.replace('-', ':')}"
 
 html = f"""<!DOCTYPE html>
 <html lang="ko">
@@ -33,15 +48,19 @@ html = f"""<!DOCTYPE html>
     .subtitle {{ color: #57606a; font-size: .875rem; margin-top: 6px; }}
     .card {{ background: white; border: 1px solid #d0d7de; border-radius: 8px; overflow: hidden; }}
     table {{ width: 100%; border-collapse: collapse; }}
-    th {{ background: #f6f8fa; padding: 10px 16px; text-align: left; font-size: .8rem; color: #57606a; font-weight: 600; border-bottom: 1px solid #d0d7de; letter-spacing: .04em; }}
-    td {{ padding: 11px 16px; border-bottom: 1px solid #f0f0f0; font-size: .9rem; }}
+    .date-header td {{ background: #f6f8fa; padding: 8px 16px; font-size: .78rem; font-weight: 700;
+                       color: #57606a; letter-spacing: .06em; border-bottom: 1px solid #d0d7de;
+                       border-top: 2px solid #d0d7de; text-transform: uppercase; }}
+    .date-header:first-child td {{ border-top: none; }}
+    td {{ padding: 10px 16px; border-bottom: 1px solid #f0f0f0; font-size: .9rem; }}
     tr:last-child td {{ border-bottom: none; }}
-    tr:hover td {{ background: #f6f8fa; }}
+    tr:not(.date-header):hover td {{ background: #f6f8fa; }}
+    .time-cell {{ padding-left: 28px; }}
     a {{ color: #0969da; text-decoration: none; font-weight: 500; }}
     a:hover {{ text-decoration: underline; }}
     .badge-new {{ background: #2da44e; color: white; font-size: .7rem; padding: 2px 8px; border-radius: 10px; font-weight: 600; }}
     .row-new td {{ background: #f0fff4; }}
-    .row-new:hover td {{ background: #e6fced; }}
+    .row-new:hover td {{ background: #e6fced !important; }}
     .footer {{ text-align: center; color: #8c959f; font-size: .8rem; margin-top: 16px; }}
   </style>
 </head>
@@ -49,16 +68,15 @@ html = f"""<!DOCTYPE html>
   <div class="container">
     <header>
       <h1>이지랩 헬스체크 리포트</h1>
-      <p class="subtitle">총 {len(dates)}개 리포트 &nbsp;·&nbsp; 매일 KST 00:00 자동 실행</p>
+      <p class="subtitle">총 {len(entries)}개 리포트 &nbsp;·&nbsp; KST 01:00 / 05:00 / 09:00 / 12:00 / 15:00 / 19:00 자동 실행</p>
     </header>
     <div class="card">
       <table>
-        <thead><tr><th>날짜</th><th></th></tr></thead>
         <tbody>
 {rows}        </tbody>
       </table>
     </div>
-    <p class="footer">최근 업데이트: {current_date}</p>
+    <p class="footer">최근 실행: {cur_display} (KST)</p>
   </div>
 </body>
 </html>"""
@@ -66,4 +84,4 @@ html = f"""<!DOCTYPE html>
 with open(output_file, 'w', encoding='utf-8') as f:
     f.write(html)
 
-print(f"인덱스 생성 완료: {len(dates)}개 날짜")
+print(f"인덱스 생성 완료: {len(entries)}개 실행 기록")

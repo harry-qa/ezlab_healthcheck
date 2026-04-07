@@ -39,23 +39,24 @@ jobs:
         run: npx playwright test tests/ezlab.spec.ts
         continue-on-error: true
 
-      - name: 날짜별 리포트 저장 및 인덱스 생성
+      - name: 실행별 리포트 저장 및 인덱스 생성
         env:
           TZ: Asia/Seoul
         run: |
-          DATE=$(date +'%Y-%m-%d')
-          mkdir -p reports/$DATE
-          cp -r playwright-report/. reports/$DATE/
+          DATETIME=$(date +'%Y-%m-%d_%H-%M')
 
-          # gh-pages 브랜치에서 기존 날짜 목록 수집
+          mkdir -p reports/$DATETIME
+          cp -r playwright-report/. reports/$DATETIME/
+
+          # gh-pages 브랜치에서 기존 실행 목록 수집 (최대 30일 * 6회 = 180개)
           git fetch origin gh-pages 2>/dev/null || true
           git ls-tree --name-only origin/gh-pages 2>/dev/null \
-            | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' > /tmp/dates.txt || true
-          echo "$DATE" >> /tmp/dates.txt
-          sort -r /tmp/dates.txt | uniq | head -90 > /tmp/all_dates.txt
+            | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}$' > /tmp/runs.txt || true
+          echo "$DATETIME" >> /tmp/runs.txt
+          sort -r /tmp/runs.txt | uniq | head -180 > /tmp/all_runs.txt
 
-          # 날짜 목록 인덱스 페이지 생성
-          python3 scripts/generate_index.py /tmp/all_dates.txt "$DATE" reports/index.html
+          # 실행 목록 인덱스 페이지 생성
+          python3 scripts/generate_index.py /tmp/all_runs.txt "$DATETIME" reports/index.html
 
       - name: GitHub Pages 배포
         uses: peaceiris/actions-gh-pages@v3
