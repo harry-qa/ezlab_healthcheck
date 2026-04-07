@@ -2,17 +2,18 @@ name: 이지랩 헬스체크
 
 on:
   schedule:
-    - cron: '0 16 * * *'  # KST 01:00 (새벽 1)
-    - cron: '0 20 * * *'  # KST 05:00 (새벽 2)
-    - cron: '0 0 * * *'   # KST 09:00 (오전 1)
-    - cron: '0 3 * * *'   # KST 12:00 (오전 2)
-    - cron: '0 6 * * *'   # KST 15:00 (오후 1)
-    - cron: '0 10 * * *'  # KST 19:00 (오후 2)
+    - cron: '0 16 * * *'  # KST 01:00
+    - cron: '0 20 * * *'  # KST 05:00
+    - cron: '0 0 * * *'   # KST 09:00
+    - cron: '0 3 * * *'   # KST 12:00
+    - cron: '0 6 * * *'   # KST 15:00
+    - cron: '0 10 * * *'  # KST 19:00
   workflow_dispatch:
 
 permissions:
   contents: write
   pages: write
+  issues: write
 
 jobs:
   health-check:
@@ -44,19 +45,62 @@ jobs:
           TZ: Asia/Seoul
         run: |
           DATETIME=$(date +'%Y-%m-%d_%H-%M')
+          echo "RUN_DATETIME=$DATETIME" >> $GITHUB_ENV
 
           mkdir -p reports/$DATETIME
           cp -r playwright-report/. reports/$DATETIME/
+          cp report-status.json reports/$DATETIME/status.json 2>/dev/null || echo '{"status":"UNKNOWN","passCount":0,"failCount":0,"warnCount":0,"serverTimes":{}}' > reports/$DATETIME/status.json
 
-          # gh-pages 브랜치에서 기존 실행 목록 수집 (최대 30일 * 6회 = 180개)
+          # gh-pages 브랜치에서 기존 실행 목록 수집 (최대 180개)
           git fetch origin gh-pages 2>/dev/null || true
           git ls-tree --name-only origin/gh-pages 2>/dev/null \
             | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{2}-[0-9]{2}$' > /tmp/runs.txt || true
           echo "$DATETIME" >> /tmp/runs.txt
           sort -r /tmp/runs.txt | uniq | head -180 > /tmp/all_runs.txt
 
-          # 실행 목록 인덱스 페이지 생성
-          python3 scripts/generate_index.py /tmp/all_runs.txt "$DATETIME" reports/index.html
+          # 누적 상태 파일 로드 및 업데이트
+          git show origin/gh-pages:statuses.json > /tmp/statuses.json 2>/dev/null || echo '{}' > /tmp/statuses.json
+
+          CURRENT_STATUS=$(python3 -c "import json; d=json.load(open('report-status.json')); print(d.get('status','UNKNOWN'))" 2>/dev/null || echo "UNKNOWN")
+          echo "HEALTH_STATUS=$CURRENT_STATUS" >> $GITHUB_ENV
+
+          python3 -c "
+          import json, sys
+          with open('/tmp/statuses.json') as f:
+              s = json.load(f)
+          s[sys.argv[1]] = sys.argv[2]
+          keys = sorted(s.keys(), reverse=True)[:180]
+          s = {k: s[k] for k in keys}
+          with open('/tmp/statuses.json', 'w') as f:
+              json.dump(s, f)
+          " "$DATETIME" "$CURRENT_STATUS"
+
+          # 누적 성능 히스토리 관리
+          git show origin/gh-pages:perf-history.json > /tmp/perf-history.json 2>/dev/null || echo '{}' > /tmp/perf-history.json
+
+          python3 -c "
+          import json, sys
+          with open('/tmp/perf-history.json') as f:
+              h = json.load(f)
+          try:
+              with open('report-status.json') as f:
+                  d = json.load(f)
+              h[sys.argv[1]] = {
+                  'serverTimes': d.get('serverTimes', {}),
+              }
+          except Exception:
+              h[sys.argv[1]] = {}
+          keys = sorted(h.keys(), reverse=True)[:180]
+          h = {k: h[k] for k in keys}
+          with open('/tmp/perf-history.json', 'w') as f:
+              json.dump(h, f)
+          " "$DATETIME"
+
+          cp /tmp/statuses.json reports/statuses.json
+          cp /tmp/perf-history.json reports/perf-history.json
+
+          # 인덱스 페이지 생성
+          python3 scripts/generate_index.py /tmp/all_runs.txt "$DATETIME" /tmp/statuses.json /tmp/perf-history.json reports/index.html
 
       - name: GitHub Pages 배포
         uses: peaceiris/actions-gh-pages@v3
@@ -64,3 +108,21 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./reports
           keep_files: true
+
+      - name: 실패 알림 (GitHub Issue 자동 생성)
+        if: env.HEALTH_STATUS == 'FAIL'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          FAIL_TIME=$(TZ=Asia/Seoul date +'%Y-%m-%d %H:%M KST')
+          gh issue create \
+            --title "🚨 헬스체크 실패 감지 - $FAIL_TIME" \
+            --body "## 이지랩 헬스체크 실패
+
+**감지 시각:** $FAIL_TIME
+
+### 리포트 확인
+- [GitHub Actions 실행 로그](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+- [헬스체크 리포트 페이지](https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/)
+
+> 자동 생성된 이슈입니다. 서비스 복구 후 직접 닫아주세요." 2>/dev/null || true

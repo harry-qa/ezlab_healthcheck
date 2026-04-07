@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import * as fs from 'fs';
 
 test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, request }) => {
   test.setTimeout(600000);
@@ -48,6 +49,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   let passCount = 0;
   let failCount = 0;
   let warnCount = 0;
+  const serverTimes: Record<string, number> = {};
 
   async function checkUrl(type: string, lang: string, url: string, isInternal: boolean = true) {
     const cleanUrl = url.split('?')[0];
@@ -133,6 +135,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
 
           if (status === 200) {
             passCount++;
+            serverTimes[lang] = responseTime;
             console.log(`[PASS][${lang}] 서버 ${status} (${responseTime}ms)`);
           } else {
             failCount++;
@@ -590,6 +593,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
     body: JSON.stringify(badgeData, null, 2),
     contentType: 'application/json'
   });
+
+  // 인덱스 페이지 상태 배지용 파일 저장
+  fs.writeFileSync('report-status.json', JSON.stringify({ status, passCount, failCount, warnCount, serverTimes }));
 
   console.log(`\n${'═'.repeat(60)}`);
   console.log(`[DONE] 전체 점검 완료`);
