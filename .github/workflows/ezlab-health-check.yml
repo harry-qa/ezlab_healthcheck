@@ -72,11 +72,11 @@ jobs:
           python3 scripts/generate_index.py /tmp/all_runs.txt "$DATETIME" /tmp/statuses.json /tmp/perf-history.json reports/index.html
 
       - name: GitHub Pages 배포
-        uses: peaceiris/actions-gh-pages@v4
+        uses: JamesIves/github-pages-deploy-action@v4.8.0
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./reports
-          keep_files: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          folder: reports
+          clean: false
 
       - name: 실패 알림 (GitHub Issue 자동 생성)
         if: env.HEALTH_STATUS == 'FAIL'
