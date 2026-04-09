@@ -289,7 +289,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
           let hasDownloadLink = false;
           if (status === 200) {
             const dlLinks = await page.locator('a[href*=".exe"], a[href*=".apk"], a[href*=".zip"], a[href*="download"]').all();
-            const dlButtons = await page.locator('button:has-text("다운로드"), a:has-text("다운로드"), a:has-text("Download")').all();
+            const dlButtons = await page.locator('button:has-text("다운로드"), a:has-text("다운로드"), a:has-text("Download"), a:has-text("ダウンロード"), a:has-text("下載")').all();
             hasDownloadLink = dlLinks.length > 0 || dlButtons.length > 0;
           }
 
