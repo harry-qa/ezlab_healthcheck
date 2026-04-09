@@ -96,3 +96,4 @@ jobs:
           name: screenshots
           path: test-results/screenshots/
           if-no-files-found: ignore
+          retention-days: 2
