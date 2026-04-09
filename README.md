@@ -49,7 +49,7 @@ GitHub Pages 인덱스 페이지에서 누적 실행 이력을 한눈에 확인�
 
 - **PASS / FAIL / WARN 상태 배지**: 각 실행별 결과를 목록에서 바로 확인
 - **전체 요약 카운트**: 누적 PASS/FAIL/WARN 집계
-- **서버 응답 시간 트렌드**: 최근 12회 ko/en/jp 서버 응답 시간을 색상 바 차트로 시각화
+- **서버 응답 시간 트렌드**: 최근 12회 ko/en/jp/tw 서버 응답 시간을 색상 바 차트로 시각화
   - 초록(1초 미만) / 노랑(1~3초) / 빨강(3초 초과)
 
 👉 https://harry-qa.github.io/playwright-health-check/
