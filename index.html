@@ -48,15 +48,20 @@
     .bar { height: 12px; border-radius: 3px; min-width: 2px; transition: width .3s; }
     .bar-val { font-size: .72rem; color: #57606a; white-space: nowrap; }
     .footer { text-align: center; color: #8c959f; font-size: .8rem; margin-top: 16px; }
+    .date-header td { cursor: pointer; user-select: none; }
+    .date-header td:hover { background: #eaeef2 !important; }
+    .arrow { font-size: .65rem; margin-right: 6px; display: inline-block; transition: transform .2s; }
+    .group-count { font-size: .72rem; color: #8c959f; font-weight: 400; margin-left: 6px; }
+    .hidden { display: none; }
   </style>
 </head>
 <body>
   <div class="container">
     <header>
       <h1>이지랩 헬스체크 리포트</h1>
-      <p class="subtitle">총 18개 리포트 &nbsp;·&nbsp; 하루 6회 자동 실행</p>
+      <p class="subtitle">총 19개 리포트 &nbsp;·&nbsp; 하루 6회 자동 실행</p>
       <div class="summary">
-        <span class="sum-badge sum-pass">PASS 14</span>
+        <span class="sum-badge sum-pass">PASS 15</span>
         <span class="sum-badge sum-fail">FAIL 0</span>
         <span class="sum-badge sum-warn">WARN 0</span>
       </div>
@@ -64,27 +69,28 @@
     <div class="card">
       <table>
         <tbody>
-<tr class="date-header"><td colspan="3">2026-04-09</td></tr>
-<tr class="row-new"><td class="time-cell"><a href="2026-04-09_10-30/">10:30</a></td><td><span class="status-badge status-pass">PASS</span></td><td><span class="badge-new">최신</span></td></tr>
-<tr><td class="time-cell"><a href="2026-04-09_10-22/">10:22</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
-<tr><td class="time-cell"><a href="2026-04-09_05-51/">05:51</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
-<tr><td class="time-cell"><a href="2026-04-09_01-55/">01:55</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
-<tr class="date-header"><td colspan="3">2026-04-08</td></tr>
-<tr><td class="time-cell"><a href="2026-04-08_20-00/">20:00</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
-<tr><td class="time-cell"><a href="2026-04-08_16-07/">16:07</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
-<tr><td class="time-cell"><a href="2026-04-08_14-05/">14:05</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
-<tr><td class="time-cell"><a href="2026-04-08_13-03/">13:03</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
-<tr><td class="time-cell"><a href="2026-04-08_12-21/">12:21</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
-<tr><td class="time-cell"><a href="2026-04-08_11-06/">11:06</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
-<tr><td class="time-cell"><a href="2026-04-08_05-43/">05:43</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
-<tr><td class="time-cell"><a href="2026-04-08_01-49/">01:49</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
-<tr class="date-header"><td colspan="3">2026-04-07</td></tr>
-<tr><td class="time-cell"><a href="2026-04-07_19-59/">19:59</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
-<tr><td class="time-cell"><a href="2026-04-07_18-24/">18:24</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
-<tr><td class="time-cell"><a href="2026-04-07_16-06/">16:06</a></td><td><span class="status-badge status-unknown">?</span></td><td></td></tr>
-<tr><td class="time-cell"><a href="2026-04-07_14-19/">14:19</a></td><td><span class="status-badge status-unknown">?</span></td><td></td></tr>
-<tr><td class="time-cell"><a href="2026-04-07_11-09/">11:09</a></td><td><span class="status-badge status-unknown">?</span></td><td></td></tr>
-<tr><td class="time-cell"><a href="2026-04-07_10-00/">10:00</a></td><td><span class="status-badge status-unknown">?</span></td><td></td></tr>
+<tr class="date-header" onclick="toggleGroup('g2026-04-09')" ><td colspan="3"><span class="arrow" id="arrow-g2026-04-09">▼</span> 2026-04-09 <span class="group-count">5건</span></td></tr>
+<tr class="group-row g2026-04-09 row-new"><td class="time-cell"><a href="2026-04-09_10-58/">10:58</a></td><td><span class="status-badge status-pass">PASS</span></td><td><span class="badge-new">최신</span></td></tr>
+<tr class="group-row g2026-04-09"><td class="time-cell"><a href="2026-04-09_10-30/">10:30</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
+<tr class="group-row g2026-04-09"><td class="time-cell"><a href="2026-04-09_10-22/">10:22</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
+<tr class="group-row g2026-04-09"><td class="time-cell"><a href="2026-04-09_05-51/">05:51</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
+<tr class="group-row g2026-04-09"><td class="time-cell"><a href="2026-04-09_01-55/">01:55</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
+<tr class="date-header" onclick="toggleGroup('g2026-04-08')" ><td colspan="3"><span class="arrow" id="arrow-g2026-04-08">▶</span> 2026-04-08 <span class="group-count">8건</span></td></tr>
+<tr class="group-row g2026-04-08 hidden"><td class="time-cell"><a href="2026-04-08_20-00/">20:00</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
+<tr class="group-row g2026-04-08 hidden"><td class="time-cell"><a href="2026-04-08_16-07/">16:07</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
+<tr class="group-row g2026-04-08 hidden"><td class="time-cell"><a href="2026-04-08_14-05/">14:05</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
+<tr class="group-row g2026-04-08 hidden"><td class="time-cell"><a href="2026-04-08_13-03/">13:03</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
+<tr class="group-row g2026-04-08 hidden"><td class="time-cell"><a href="2026-04-08_12-21/">12:21</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
+<tr class="group-row g2026-04-08 hidden"><td class="time-cell"><a href="2026-04-08_11-06/">11:06</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
+<tr class="group-row g2026-04-08 hidden"><td class="time-cell"><a href="2026-04-08_05-43/">05:43</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
+<tr class="group-row g2026-04-08 hidden"><td class="time-cell"><a href="2026-04-08_01-49/">01:49</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
+<tr class="date-header" onclick="toggleGroup('g2026-04-07')" ><td colspan="3"><span class="arrow" id="arrow-g2026-04-07">▶</span> 2026-04-07 <span class="group-count">6건</span></td></tr>
+<tr class="group-row g2026-04-07 hidden"><td class="time-cell"><a href="2026-04-07_19-59/">19:59</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
+<tr class="group-row g2026-04-07 hidden"><td class="time-cell"><a href="2026-04-07_18-24/">18:24</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
+<tr class="group-row g2026-04-07 hidden"><td class="time-cell"><a href="2026-04-07_16-06/">16:06</a></td><td><span class="status-badge status-unknown">?</span></td><td></td></tr>
+<tr class="group-row g2026-04-07 hidden"><td class="time-cell"><a href="2026-04-07_14-19/">14:19</a></td><td><span class="status-badge status-unknown">?</span></td><td></td></tr>
+<tr class="group-row g2026-04-07 hidden"><td class="time-cell"><a href="2026-04-07_11-09/">11:09</a></td><td><span class="status-badge status-unknown">?</span></td><td></td></tr>
+<tr class="group-row g2026-04-07 hidden"><td class="time-cell"><a href="2026-04-07_10-00/">10:00</a></td><td><span class="status-badge status-unknown">?</span></td><td></td></tr>
         </tbody>
       </table>
     </div>
@@ -95,6 +101,13 @@
       <div class="trend-group">
         <div class="trend-lang">한국어 (/ko)</div>
         
+        <div class="bar-row">
+          <span class="bar-label">10:58</span>
+          <div class="bar-wrap">
+            <div class="bar" style="width:75%;background:#2da44e" title="10:58 · 742ms"></div>
+            <span class="bar-val">742ms</span>
+          </div>
+        </div>
         <div class="bar-row">
           <span class="bar-label">10:30</span>
           <div class="bar-wrap">
@@ -172,17 +185,17 @@
             <span class="bar-val">759ms</span>
           </div>
         </div>
-        <div class="bar-row">
-          <span class="bar-label">01:49</span>
-          <div class="bar-wrap">
-            <div class="bar" style="width:93%;background:#2da44e" title="01:49 · 916ms"></div>
-            <span class="bar-val">916ms</span>
-          </div>
-        </div>
       </div>
       <div class="trend-group">
         <div class="trend-lang">영어 (/en)</div>
         
+        <div class="bar-row">
+          <span class="bar-label">10:58</span>
+          <div class="bar-wrap">
+            <div class="bar" style="width:73%;background:#2da44e" title="10:58 · 595ms"></div>
+            <span class="bar-val">595ms</span>
+          </div>
+        </div>
         <div class="bar-row">
           <span class="bar-label">10:30</span>
           <div class="bar-wrap">
@@ -260,17 +273,17 @@
             <span class="bar-val">178ms</span>
           </div>
         </div>
-        <div class="bar-row">
-          <span class="bar-label">01:49</span>
-          <div class="bar-wrap">
-            <div class="bar" style="width:86%;background:#2da44e" title="01:49 · 701ms"></div>
-            <span class="bar-val">701ms</span>
-          </div>
-        </div>
       </div>
       <div class="trend-group">
         <div class="trend-lang">일본어 (/jp)</div>
         
+        <div class="bar-row">
+          <span class="bar-label">10:58</span>
+          <div class="bar-wrap">
+            <div class="bar" style="width:21%;background:#2da44e" title="10:58 · 174ms"></div>
+            <span class="bar-val">174ms</span>
+          </div>
+        </div>
         <div class="bar-row">
           <span class="bar-label">10:30</span>
           <div class="bar-wrap">
@@ -348,17 +361,17 @@
             <span class="bar-val">561ms</span>
           </div>
         </div>
-        <div class="bar-row">
-          <span class="bar-label">01:49</span>
-          <div class="bar-wrap">
-            <div class="bar" style="width:29%;background:#2da44e" title="01:49 · 244ms"></div>
-            <span class="bar-val">244ms</span>
-          </div>
-        </div>
       </div>
       <div class="trend-group">
         <div class="trend-lang">중국어 (/tw)</div>
         
+        <div class="bar-row">
+          <span class="bar-label">10:58</span>
+          <div class="bar-wrap">
+            <div class="bar" style="width:77%;background:#2da44e" title="10:58 · 603ms"></div>
+            <span class="bar-val">603ms</span>
+          </div>
+        </div>
         <div class="bar-row">
           <span class="bar-label">10:30</span>
           <div class="bar-wrap">
@@ -436,16 +449,18 @@
             <span class="bar-val">0ms</span>
           </div>
         </div>
-        <div class="bar-row">
-          <span class="bar-label">01:49</span>
-          <div class="bar-wrap">
-            <div class="bar" style="width:0%;background:#d0d7de" title="01:49 · -"></div>
-            <span class="bar-val">0ms</span>
-          </div>
-        </div>
       </div>
     </div>
-    <p class="footer">최근 실행: 2026-04-09 10:30 (KST)</p>
+    <p class="footer">최근 실행: 2026-04-09 10:58 (KST)</p>
   </div>
+<script>
+function toggleGroup(gid) {
+  var rows = document.querySelectorAll('.group-row.' + gid);
+  var arrow = document.getElementById('arrow-' + gid);
+  var isHidden = rows.length > 0 && rows[0].classList.contains('hidden');
+  rows.forEach(function(r) { r.classList.toggle('hidden', !isHidden); });
+  if (arrow) arrow.textContent = isHidden ? '▼' : '▶';
+}
+</script>
 </body>
 </html>
