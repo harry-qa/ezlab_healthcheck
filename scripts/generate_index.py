@@ -63,8 +63,8 @@ fail_c = sum(1 for e in entries if statuses.get(e) == 'FAIL')
 warn_c = sum(1 for e in entries if statuses.get(e) == 'WARN')
 
 # ── 응답 시간 트렌드 (최근 12회) ─────────────────────────────────
-LANGS = ['ko', 'en', 'jp']
-LANG_LABELS = {'ko': '한국어', 'en': '영어', 'jp': '일본어'}
+LANGS = ['ko', 'en', 'jp', 'tw']
+LANG_LABELS = {'ko': '한국어', 'en': '영어', 'jp': '일본어', 'tw': '중국어'}
 recent_runs = entries[:12]
 
 def bar_color(ms):
