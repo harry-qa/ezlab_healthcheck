@@ -42,17 +42,22 @@ for entry in entries:
 sorted_dates = sorted(grouped.keys(), reverse=True)
 
 rows = ""
-for date in sorted_dates:
+for idx, date in enumerate(sorted_dates):
     runs = grouped[date]
-    rows += f'<tr class="date-header"><td colspan="3">{date}</td></tr>\n'
+    gid = f"g{date}"
+    is_open = (idx == 0)
+    arrow_char = "▼" if is_open else "▶"
+    hidden_cls = "" if is_open else " hidden"
+    rows += f'<tr class="date-header" onclick="toggleGroup(\'{gid}\')" ><td colspan="3"><span class="arrow" id="arrow-{gid}">{arrow_char}</span> {date} <span class="group-count">{len(runs)}건</span></td></tr>\n'
     for entry, time_display in runs:
         is_new = entry == current_run
         new_badge = '<span class="badge-new">최신</span>' if is_new else ''
-        row_class = ' class="row-new"' if is_new else ''
+        classes = f"group-row {gid}{hidden_cls}"
+        if is_new: classes += " row-new"
         st = statuses.get(entry, 'UNKNOWN')
         label, css = STATUS_MAP.get(st, ('?', 'status-unknown'))
         status_html = f'<span class="status-badge {css}">{label}</span>'
-        rows += f'<tr{row_class}><td class="time-cell"><a href="{entry}/">{time_display}</a></td><td>{status_html}</td><td>{new_badge}</td></tr>\n'
+        rows += f'<tr class="{classes}"><td class="time-cell"><a href="{entry}/">{time_display}</a></td><td>{status_html}</td><td>{new_badge}</td></tr>\n'
 
 cur_date, cur_time = current_run.split('_')
 cur_display = f"{cur_date} {cur_time.replace('-', ':')}"
@@ -167,6 +172,11 @@ css = """
     .bar { height: 12px; border-radius: 3px; min-width: 2px; transition: width .3s; }
     .bar-val { font-size: .72rem; color: #57606a; white-space: nowrap; }
     .footer { text-align: center; color: #8c959f; font-size: .8rem; margin-top: 16px; }
+    .date-header td { cursor: pointer; user-select: none; }
+    .date-header td:hover { background: #eaeef2 !important; }
+    .arrow { font-size: .65rem; margin-right: 6px; display: inline-block; transition: transform .2s; }
+    .group-count { font-size: .72rem; color: #8c959f; font-weight: 400; margin-left: 6px; }
+    .hidden { display: none; }
 """
 
 html = f"""<!DOCTYPE html>
@@ -197,6 +207,15 @@ html = f"""<!DOCTYPE html>
 {trend_section}
     <p class="footer">최근 실행: {cur_display} (KST)</p>
   </div>
+<script>
+function toggleGroup(gid) {{
+  var rows = document.querySelectorAll('.group-row.' + gid);
+  var arrow = document.getElementById('arrow-' + gid);
+  var isHidden = rows.length > 0 && rows[0].classList.contains('hidden');
+  rows.forEach(function(r) {{ r.classList.toggle('hidden', !isHidden); }});
+  if (arrow) arrow.textContent = isHidden ? '▼' : '▶';
+}}
+</script>
 </body>
 </html>"""
 
