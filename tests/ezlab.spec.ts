@@ -462,9 +462,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   // en/jp/tw: 구글, 이메일로 시작하기, 계정찾기
   const loginChecks: { lang: string; buttons: string[] }[] = [
     { lang: 'ko', buttons: ['카카오', '네이버', '구글', '이메일'] },
-    { lang: 'en', buttons: ['Google', 'Email'] },
-    { lang: 'jp', buttons: ['Google', 'Email'] },
-    { lang: 'tw', buttons: ['Google', 'Email'] },
+    { lang: 'en', buttons: ['Login with Google', 'Start with email'] },
+    { lang: 'jp', buttons: ['Googleでログイン', 'メールで始める'] },
+    { lang: 'tw', buttons: ['使用 Google 登入', '使用電子郵件開始'] },
   ];
 
   await test.step('STEP 7 · 로그인 폼 렌더링 확인 (언어별)', async () => {
