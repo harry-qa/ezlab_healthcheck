@@ -11,7 +11,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
 
   const baseUrl = 'https://ezlab.im';
   const errorKeywords = ['점검중', '서비스 준비중', '404 not found', '500 internal', 'page not found'];
-  const languages = ['ko', 'en', 'jp'];
+  const languages = ['ko', 'en', 'jp', 'tw'];
   const visitedUrls = new Set<string>();
 
   // ── 각 서비스 다운로드 URL (하드코딩) ─────────────────────────────
@@ -31,6 +31,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
     ko: ['다운로드', '이지캡쳐', '이지집'],
     en: ['download', 'ezcapture', 'ezzip'],
     jp: ['ダウンロード', 'ezcapture', 'ezzip'],  // toLowerCase() 비교 기준으로 소문자 통일
+    tw: ['下載', 'ezcapture', 'ezzip'],
   };
 
   type ApiRecord  = { url: string; method: string; status: number; time: number; note: string };
@@ -122,7 +123,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   // ══════════════════════════════════════════════════════════════════
   // STEP 1: 다국어 서버 생존 확인
   // ══════════════════════════════════════════════════════════════════
-  await test.step('STEP 1 · 다국어 서버 생존 확인 (ko / en / jp)', async () => {
+  await test.step('STEP 1 · 다국어 서버 생존 확인 (ko / en / jp / tw)', async () => {
     for (const lang of languages) {
       await test.step(`[서버][${lang}] 응답 확인`, async () => {
         const serverUrl = `${baseUrl}/${lang}`;
@@ -241,7 +242,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   // ══════════════════════════════════════════════════════════════════
   // STEP 3: UI 링크 전수조사 (내부/외부 분리)
   // ══════════════════════════════════════════════════════════════════
-  await test.step('STEP 3 · UI 링크 전수조사 (ko / en / jp)', async () => {
+  await test.step('STEP 3 · UI 링크 전수조사 (ko / en / jp / tw)', async () => {
     for (const lang of languages) {
       await test.step(`[${lang}] <a> 링크 수집 및 점검`, async () => {
         const startPage = `${baseUrl}/${lang}`;
@@ -389,7 +390,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   // ══════════════════════════════════════════════════════════════════
   // STEP 6: 깨진 이미지 감지
   // ══════════════════════════════════════════════════════════════════
-  await test.step('STEP 6 · 깨진 이미지 감지 (ko / en / jp)', async () => {
+  await test.step('STEP 6 · 깨진 이미지 감지 (ko / en / jp / tw)', async () => {
     for (const lang of languages) {
       await test.step(`[${lang}] <img> 이미지 점검`, async () => {
         try {
@@ -500,7 +501,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
     `  API           : ${apiRecords.length}개`,
     sep2,
     '[STEP별 상태]',
-    `  STEP 1 · 서버 생존 확인 (ko/en/jp)`,
+    `  STEP 1 · 서버 생존 확인 (ko/en/jp/tw)`,
     `  STEP 2 · API 자동 수집 및 검증 (${apiRecords.length}건)`,
     `  STEP 3 · UI 링크 전수조사`,
     `  STEP 4 · 다운로드 페이지 + 실제 파일 URL 검증`,
