@@ -88,3 +88,11 @@ jobs:
           FAIL_TIME=$(TZ=Asia/Seoul date +'%Y-%m-%d %H:%M KST')
           BODY=$(printf "## 이지랩 헬스체크 실패\n\n**감지 시각:** %s\n\n### 리포트 확인\n- [GitHub Actions 실행 로그](%s)\n- [헬스체크 리포트 페이지](%s)\n\n> 자동 생성된 이슈입니다. 서비스 복구 후 직접 닫아주세요." "$FAIL_TIME" "$REPORT_URL" "$PAGES_URL")
           gh issue create --title "🚨 헬스체크 실패 감지 - $FAIL_TIME" --body "$BODY" 2>/dev/null || true
+
+      - name: 스크린샷 artifact 업로드
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots
+          path: test-results/screenshots/
+          if-no-files-found: ignore

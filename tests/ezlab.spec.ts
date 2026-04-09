@@ -1,5 +1,19 @@
 import { test, expect } from '@playwright/test';
 import * as fs from 'fs';
+import * as path from 'path';
+
+const SCREENSHOT_DIR = 'test-results/screenshots';
+fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
+
+test.afterEach(async ({ page }, testInfo) => {
+  if (testInfo.status !== testInfo.expectedStatus) {
+    const ts = Date.now();
+    const safeTitle = testInfo.title.replace(/[^a-zA-Z0-9가-힣]/g, '_').slice(0, 50);
+    const filePath = path.join(SCREENSHOT_DIR, `fail-${safeTitle}-${ts}.png`);
+    await page.screenshot({ path: filePath, fullPage: true });
+    console.log(`[SCREENSHOT] afterEach 실패 스크린샷: ${filePath}`);
+  }
+});
 
 test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, request }) => {
   test.setTimeout(600000);
@@ -222,6 +236,14 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
           const ts = kstNow();
           console.log(`[FAIL] ${label} @ ${ts}`);
           failRecords.push({ step: 'STEP2·API', type: 'API', lang: '-', url: rec.url, status: rec.status, responseTime: rec.time, symptom: rec.note, timestamp: ts });
+          if (rec.status >= 500) {
+            try {
+              await page.goto(rec.url, { waitUntil: 'domcontentloaded', timeout: 10000 });
+              const ssPath = path.join(SCREENSHOT_DIR, `api-fail-${rec.status}-${Date.now()}.png`);
+              await page.screenshot({ path: ssPath, fullPage: true });
+              console.log(`[SCREENSHOT] API 500 스크린샷: ${ssPath}`);
+            } catch { /* 스크린샷 실패 시 무시 */ }
+          }
           expect.soft(rec.status, label).toBeLessThan(500);
         } else {
           passCount++;
