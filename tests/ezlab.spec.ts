@@ -535,7 +535,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
     `  STEP 4 · 다운로드 페이지 + 실제 파일 URL 검증`,
     `  STEP 5 · 언어별 핵심 콘텐츠 무결성 확인`,
     `  STEP 6 · 깨진 이미지 감지`,
-    `  STEP 7 · 소셜 로그인 버튼 렌더링 확인`,
+    `  STEP 7 · 언어별 로그인 버튼 렌더링 확인`,
   ];
 
   if (failRecords.length > 0) {
