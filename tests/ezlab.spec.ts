@@ -458,42 +458,48 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   // ══════════════════════════════════════════════════════════════════
   // STEP 7: 로그인 폼 렌더링 확인
   // ══════════════════════════════════════════════════════════════════
-  await test.step('STEP 7 · 로그인 폼 렌더링 확인', async () => {
-    await test.step('[로그인] 폼 요소 존재 확인', async () => {
-      const loginUrl = `${baseUrl}/ko/login`;
-      try {
-        await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+  // ko: 카카오, 네이버, 구글, 이메일로 로그인, 계정찾기
+  // en/jp/tw: 구글, 이메일로 시작하기, 계정찾기
+  const loginChecks: { lang: string; buttons: string[] }[] = [
+    { lang: 'ko', buttons: ['카카오', '네이버', '구글', '이메일'] },
+    { lang: 'en', buttons: ['Google', 'Email'] },
+    { lang: 'jp', buttons: ['Google', 'Email'] },
+    { lang: 'tw', buttons: ['Google', 'Email'] },
+  ];
 
-        // 소셜 로그인 페이지: 카카오/네이버/구글 버튼 존재 확인
-        const kakaoBtn  = await page.locator('button:has-text("카카오")').count();
-        const naverBtn  = await page.locator('button:has-text("네이버")').count();
-        const googleBtn = await page.locator('button:has-text("구글")').count();
-        const formOk    = kakaoBtn > 0 && naverBtn > 0 && googleBtn > 0;
+  await test.step('STEP 7 · 로그인 폼 렌더링 확인 (언어별)', async () => {
+    for (const { lang, buttons } of loginChecks) {
+      await test.step(`[로그인][${lang}] 버튼 존재 확인`, async () => {
+        const loginUrl = `${baseUrl}/${lang}/login`;
+        try {
+          await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
 
-        if (!formOk) {
-          warnCount++;
-          const ssLogin = await page.screenshot({ fullPage: false });
-          await test.info().attach('스크린샷_로그인폼', { body: ssLogin, contentType: 'image/png' });
-          const missing = [
-            kakaoBtn  === 0 ? '카카오 로그인' : '',
-            naverBtn  === 0 ? '네이버 로그인' : '',
-            googleBtn === 0 ? '구글 로그인'   : '',
-          ].filter(Boolean).join(', ');
+          const missing: string[] = [];
+          for (const btn of buttons) {
+            const count = await page.locator(`button:has-text("${btn}"), a:has-text("${btn}")`).count();
+            if (count === 0) missing.push(btn);
+          }
+
+          if (missing.length > 0) {
+            warnCount++;
+            const ssLogin = await page.screenshot({ fullPage: false });
+            await test.info().attach(`스크린샷_로그인폼_${lang}`, { body: ssLogin, contentType: 'image/png' });
+            const ts = kstNow();
+            console.log(`[WARN][로그인][${lang}] 버튼 미감지: ${missing.join(', ')} @ ${ts}`);
+            failRecords.push({ step: 'STEP7·로그인폼', type: '로그인', lang, url: loginUrl, status: 200, responseTime: 0, symptom: `버튼 미감지: ${missing.join(', ')}`, timestamp: ts });
+          } else {
+            passCount++;
+            console.log(`[PASS][로그인][${lang}] 버튼 모두 확인: ${buttons.join(', ')}`);
+          }
+        } catch {
+          failCount++;
           const ts = kstNow();
-          console.log(`[WARN][로그인] 소셜 버튼 미감지: ${missing} @ ${ts}`);
-          failRecords.push({ step: 'STEP7·로그인폼', type: '로그인', lang: 'ko', url: loginUrl, status: 200, responseTime: 0, symptom: `소셜 버튼 미감지: ${missing}`, timestamp: ts });
-        } else {
-          passCount++;
-          console.log(`[PASS][로그인] 카카오 / 네이버 / 구글 로그인 버튼 모두 확인`);
+          console.log(`[ERROR][로그인][${lang}] 페이지 진입 실패: ${loginUrl} @ ${ts}`);
+          failRecords.push({ step: 'STEP7·로그인폼', type: '로그인', lang, url: loginUrl, status: 0, responseTime: 0, symptom: '페이지 진입 실패', timestamp: ts });
+          expect.soft(null, `[로그인][${lang}] 페이지 진입 실패`).not.toBeNull();
         }
-      } catch {
-        failCount++;
-        const ts = kstNow();
-        console.log(`[ERROR][로그인] 페이지 진입 실패: ${loginUrl} @ ${ts}`);
-        failRecords.push({ step: 'STEP7·로그인폼', type: '로그인', lang: 'ko', url: loginUrl, status: 0, responseTime: 0, symptom: '페이지 진입 실패', timestamp: ts });
-        expect.soft(null, '[로그인] 페이지 진입 실패').not.toBeNull();
-      }
-    });
+      });
+    }
   });
 
   // ══════════════════════════════════════════════════════════════════
