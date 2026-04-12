@@ -6,3 +6,9 @@ node_modules/
 /blob-report/
 /playwright/.cache/
 /playwright/.auth/
+
+# macOS
+.DS_Store
+
+# Claude local config
+.claude/

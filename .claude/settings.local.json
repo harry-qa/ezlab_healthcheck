@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(claude --version)",
-      "Read(//Users/steinw/.claude/**)"
-    ]
-  }
-}
