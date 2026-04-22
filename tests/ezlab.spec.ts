@@ -268,6 +268,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
     for (const lang of languages) {
       await test.step(`[${lang}] <a> 링크 수집 및 점검 (depth 2)`, async () => {
         const crawledPages = new Set<string>();
+        const termPagesFound = new Set<string>(); // depth 무관하게 term 페이지 수집
 
         async function crawlPage(pageUrl: string, depth: number) {
           const cleanUrl = pageUrl.split('?')[0];
@@ -299,14 +300,25 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
             const isInternal = url.startsWith(baseUrl);
             await checkUrl('UI', lang, url, isInternal);
 
-            if (isInternal && depth < 1) {
-              internalToFollow.push(url);
+            if (isInternal) {
+              if (depth < 1) internalToFollow.push(url);
+              if (url.includes('/term/')) termPagesFound.add(url.split('?')[0]);
             }
           }
 
-          // 버튼 클릭으로 URL이 변경되는 탭 구조 감지 (term 페이지에서만)
-          if (pageUrl.includes('/term/')) {
-            // term 탭 버튼은 JS 로드 후 렌더링되므로 나타날 때까지 대기
+          for (const nextUrl of internalToFollow) {
+            await crawlPage(nextUrl, depth + 1);
+          }
+        }
+
+        await crawlPage(`${baseUrl}/${lang}`, 0);
+
+        // depth 무관하게 발견된 term 페이지에서 탭 버튼 클릭으로 숨겨진 URL 감지
+        for (const termUrl of termPagesFound) {
+          if (crawledPages.has(termUrl)) continue;
+          crawledPages.add(termUrl);
+          try {
+            await page.goto(termUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
             await page.waitForSelector('button.flex-1', { timeout: 5000 }).catch(() => {});
             const tabCount = await page.locator('button.flex-1').count();
             for (let i = 0; i < tabCount; i++) {
@@ -318,22 +330,17 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
                 if (newUrl !== currentUrl && newUrl.startsWith(baseUrl)) {
                   console.log(`[INFO][${lang}][tab] 버튼 클릭으로 발견된 URL: ${newUrl}`);
                   await checkUrl('UI', lang, newUrl, true);
-                  if (depth < 1) internalToFollow.push(newUrl);
-                  await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+                  await page.goto(termUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
                   await page.waitForSelector('button.flex-1', { timeout: 5000 }).catch(() => {});
                 }
               } catch {
                 // 클릭 불가한 버튼은 무시
               }
             }
-          }
-
-          for (const nextUrl of internalToFollow) {
-            await crawlPage(nextUrl, depth + 1);
+          } catch {
+            console.log(`[SKIP][${lang}][tab] term 페이지 진입 실패: ${termUrl}`);
           }
         }
-
-        await crawlPage(`${baseUrl}/${lang}`, 0);
       });
     }
   });
