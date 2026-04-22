@@ -71,6 +71,9 @@ jobs:
 
           python3 scripts/generate_index.py /tmp/all_runs.txt "$DATETIME" /tmp/statuses.json /tmp/perf-history.json reports/index.html
 
+      - name: 대용량 파일 제거 (GitHub 100MB 제한 대응)
+        run: find reports -name "*.zip" -size +50M -delete
+
       - name: GitHub Pages 배포
         uses: JamesIves/github-pages-deploy-action@v4.8.0
         with:

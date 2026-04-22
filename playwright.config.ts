@@ -28,8 +28,8 @@ export default defineConfig({
     /* Base URL to use in actions like `await page.goto('')`. */
     // baseURL: 'http://localhost:3000',
 
-    /* Collect trace when retrying the failed test. See https://playwright.dev/docs/trace-viewer */
-    trace: 'on-first-retry',
+    /* 헬스체크는 trace 불필요 (파일 크기 문제로 CI 배포 실패 방지) */
+    trace: 'off',
 
     /* 로컬: 브라우저 창 열림 / CI: headless 실행 */
     headless: process.env.CI ? true : false,
