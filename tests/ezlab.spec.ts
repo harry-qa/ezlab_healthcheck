@@ -266,30 +266,74 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   // ══════════════════════════════════════════════════════════════════
   await test.step('STEP 3 · UI 링크 전수조사 (ko / en / jp / tw)', async () => {
     for (const lang of languages) {
-      await test.step(`[${lang}] <a> 링크 수집 및 점검`, async () => {
-        const startPage = `${baseUrl}/${lang}`;
-        try {
-          await page.goto(startPage, { waitUntil: 'domcontentloaded', timeout: 15000 });
-        } catch {
-          console.log(`[SKIP][${lang}] 페이지 진입 실패`);
-          return;
+      await test.step(`[${lang}] <a> 링크 수집 및 점검 (depth 2)`, async () => {
+        const crawledPages = new Set<string>();
+
+        async function crawlPage(pageUrl: string, depth: number) {
+          const cleanUrl = pageUrl.split('?')[0];
+          if (crawledPages.has(cleanUrl)) return;
+          crawledPages.add(cleanUrl);
+
+          try {
+            await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+            await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+            await page.waitForTimeout(500);
+          } catch {
+            console.log(`[SKIP][${lang}][depth${depth}] 페이지 진입 실패: ${pageUrl}`);
+            return;
+          }
+
+          const links = await page.locator('a').all();
+          console.log(`[INFO][${lang}][depth${depth}] ${pageUrl} → ${links.length}개 링크 발견`);
+
+          const internalToFollow: string[] = [];
+          for (const link of links) {
+            const rawUrl = await link.getAttribute('href');
+            if (!rawUrl || rawUrl.startsWith('#') || rawUrl.startsWith('javascript:') || rawUrl.startsWith('mailto:')) continue;
+            if (/\.(exe|apk|zip|dmg|msi|pkg)$/i.test(rawUrl)) continue; // 다운로드 파일 스킵
+
+            const url = rawUrl.startsWith('http')
+              ? rawUrl
+              : baseUrl + (rawUrl.startsWith('/') ? rawUrl : '/' + rawUrl);
+
+            const isInternal = url.startsWith(baseUrl);
+            await checkUrl('UI', lang, url, isInternal);
+
+            if (isInternal && depth < 1) {
+              internalToFollow.push(url);
+            }
+          }
+
+          // 버튼 클릭으로 URL이 변경되는 탭 구조 감지 (term 페이지에서만)
+          if (pageUrl.includes('/term/')) {
+            // term 탭 버튼은 JS 로드 후 렌더링되므로 나타날 때까지 대기
+            await page.waitForSelector('button.flex-1', { timeout: 5000 }).catch(() => {});
+            const tabCount = await page.locator('button.flex-1').count();
+            for (let i = 0; i < tabCount; i++) {
+              try {
+                const currentUrl = page.url().split('?')[0];
+                await page.locator('button.flex-1').nth(i).click({ timeout: 3000 });
+                await page.waitForTimeout(500);
+                const newUrl = page.url().split('?')[0];
+                if (newUrl !== currentUrl && newUrl.startsWith(baseUrl)) {
+                  console.log(`[INFO][${lang}][tab] 버튼 클릭으로 발견된 URL: ${newUrl}`);
+                  await checkUrl('UI', lang, newUrl, true);
+                  if (depth < 1) internalToFollow.push(newUrl);
+                  await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+                  await page.waitForSelector('button.flex-1', { timeout: 5000 }).catch(() => {});
+                }
+              } catch {
+                // 클릭 불가한 버튼은 무시
+              }
+            }
+          }
+
+          for (const nextUrl of internalToFollow) {
+            await crawlPage(nextUrl, depth + 1);
+          }
         }
 
-        const links = await page.locator('a').all();
-        console.log(`[INFO][${lang}] 총 ${links.length}개 링크 발견`);
-
-        for (const link of links) {
-          const rawUrl = await link.getAttribute('href');
-          if (!rawUrl || rawUrl.startsWith('#') || rawUrl.startsWith('javascript:')) continue;
-
-          const url = rawUrl.startsWith('http')
-            ? rawUrl
-            : baseUrl + (rawUrl.startsWith('/') ? rawUrl : '/' + rawUrl);
-
-          // 내부/외부 링크 분리
-          const isInternal = url.startsWith(baseUrl);
-          await checkUrl('UI', lang, url, isInternal);
-        }
+        await crawlPage(`${baseUrl}/${lang}`, 0);
       });
     }
   });
