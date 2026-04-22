@@ -28,16 +28,8 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   const languages = ['ko', 'en', 'jp', 'tw'];
   const visitedUrls = new Set<string>();
 
-  // ── 각 서비스 다운로드 URL (하드코딩) ─────────────────────────────
-  const downloadTargets = [
-    { name: '이지캡쳐',   url: 'https://ezlab.im/ko/tool/ezcapture' },
-    { name: '이지집',     url: 'https://ezlab.im/ko/tool/ezzip' },
-    { name: '이지파인더', url: 'https://ezlab.im/ko/tool/ezfinder' },
-    { name: '이지메모',   url: 'https://ezlab.im/ko/tool/ezmemo' },
-    { name: '이지캠',     url: 'https://ezlab.im/ko/tool/ezcam' },
-    { name: '이지리더',   url: 'https://ezlab.im/ko/tool/ezreader' },
-    // 이지다운은 Android 전용, 별도 웹 페이지 없으므로 제외
-  ];
+  // ── 서비스 도구 페이지 (STEP 3 크롤링에서 자동 수집) ────────────
+  const discoveredToolUrls = new Set<string>();
 
   // ── 언어별 핵심 콘텐츠 키워드 ───────────────────────────────────
   // 실제 페이지 기준으로 확인된 키워드만 사용
@@ -303,6 +295,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
             if (isInternal) {
               if (depth < 1) internalToFollow.push(url);
               if (url.includes('/term/')) termPagesFound.add(url.split('?')[0]);
+              if (url.match(/\/ko\/tool\/[^/]+$/)) discoveredToolUrls.add(url.split('?')[0]);
             }
           }
 
@@ -346,10 +339,15 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   });
 
   // ══════════════════════════════════════════════════════════════════
-  // STEP 4: 서비스별 다운로드 링크 직접 검증 (신규)
+  // STEP 4: 서비스별 다운로드 링크 직접 검증 (STEP 3에서 자동 수집)
   // ══════════════════════════════════════════════════════════════════
   await test.step('STEP 4 · 서비스별 다운로드 페이지 직접 검증', async () => {
-    for (const target of downloadTargets) {
+    const toolTargets = [...discoveredToolUrls].map(url => ({
+      name: url.split('/').pop() ?? url,
+      url,
+    }));
+    console.log(`[INFO] STEP 4 대상 서비스 페이지 ${toolTargets.length}개 자동 수집: ${toolTargets.map(t => t.name).join(', ')}`);
+    for (const target of toolTargets) {
       await test.step(`[다운로드][${target.name}]`, async () => {
         try {
           visitedUrls.add(target.url); // 최종 집계에 포함
