@@ -63,11 +63,14 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
     if (visitedUrls.has(cleanUrl)) return;
     visitedUrls.add(cleanUrl);
 
+    // 외부 링크는 쿼리 파라미터 포함한 원본 URL로 요청 (파라미터 제거 시 의도치 않은 동작 방지)
+    const requestUrl = isInternal ? cleanUrl : url;
+
     try {
       await page.waitForTimeout(Math.floor(Math.random() * 500) + 300);
 
       const startTime = Date.now();
-      const res = await page.request.get(cleanUrl, { headers, timeout: 8000 });
+      const res = await page.request.get(requestUrl, { headers, timeout: 8000 });
       const responseTime = Date.now() - startTime;
 
       const status = res.status();
