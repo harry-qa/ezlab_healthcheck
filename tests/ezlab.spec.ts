@@ -88,7 +88,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
       const result =
         status !== 200 ? (isInternal ? 'FAIL' : 'WARN') :
         contentIssue   ? 'FAIL' :
-        isSlow         ? 'SLOW' : 'PASS';
+        isSlow         ? (isInternal ? 'SLOW' : 'WARN') : 'PASS';
 
       const notes: string[] = [];
       if (isRedirect)   notes.push(`리다이렉트 → ${finalUrl}`);
