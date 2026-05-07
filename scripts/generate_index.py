@@ -34,35 +34,61 @@ STATUS_MAP = {
     'UNKNOWN': ('?',    'status-unknown'),
 }
 
-grouped = defaultdict(list)
+# month → day → runs (3단계)
+by_month = defaultdict(lambda: defaultdict(list))
 for entry in entries:
     date, time_str = entry.split('_')
     month = date[:7]
-    grouped[month].append((entry, date, time_str.replace('-', ':')))
+    by_month[month][date].append((entry, time_str.replace('-', ':')))
 
-sorted_months = sorted(grouped.keys(), reverse=True)
+sorted_months = sorted(by_month.keys(), reverse=True)
+current_date = current_run.split('_')[0]
 
 rows = ""
-for idx, month in enumerate(sorted_months):
-    runs = grouped[month]
+for midx, month in enumerate(sorted_months):
+    days = by_month[month]
+    sorted_days = sorted(days.keys(), reverse=True)
+    total_runs = sum(len(v) for v in days.values())
     gid = f"g{month.replace('-', '')}"
-    is_open = (idx == 0)
-    arrow_char = "▼" if is_open else "▶"
-    hidden_cls = "" if is_open else " hidden"
+    month_open = (midx == 0)
+    arrow_char = "▼" if month_open else "▶"
     year, mon = month.split('-')
     month_label = f"{year}년 {int(mon)}월"
-    rows += f'<tr class="date-header" onclick="toggleGroup(\'{gid}\')" ><td colspan="3"><span class="arrow" id="arrow-{gid}">{arrow_char}</span> {month_label} <span class="group-count">{len(runs)}건</span></td></tr>\n'
-    for entry, date, time_display in runs:
-        is_new = entry == current_run
-        new_badge = '<span class="badge-new">최신</span>' if is_new else ''
-        classes = f"group-row {gid}{hidden_cls}"
-        if is_new: classes += " row-new"
-        st = statuses.get(entry, 'UNKNOWN')
-        label, css = STATUS_MAP.get(st, ('?', 'status-unknown'))
-        status_html = f'<span class="status-badge {css}">{label}</span>'
+    rows += f'<tr class="month-header" data-gid="{gid}" onclick="toggleGroup(\'{gid}\')"><td colspan="3"><span class="arrow" id="arrow-{gid}">{arrow_char}</span> {month_label} <span class="group-count">{total_runs}건</span></td></tr>\n'
+
+    for date in sorted_days:
+        runs = days[date]
+        did = f"d{date.replace('-', '')}"
+        day_open = False
+        day_arrow = "▼" if day_open else "▶"
         date_parts = date.split('-')
         date_short = f"{date_parts[1]}/{date_parts[2]}"
-        rows += f'<tr class="{classes}"><td class="time-cell"><a href="{entry}/">{date_short} {time_display}</a></td><td>{status_html}</td><td>{new_badge}</td></tr>\n'
+
+        day_statuses = [statuses.get(e, 'UNKNOWN') for e, _ in runs]
+        if 'FAIL' in day_statuses:        day_st, day_css = 'FAIL', 'status-fail'
+        elif 'WARN' in day_statuses:      day_st, day_css = 'WARN', 'status-warn'
+        elif all(s == 'PASS' for s in day_statuses): day_st, day_css = 'PASS', 'status-pass'
+        else:                              day_st, day_css = '?',    'status-unknown'
+        day_badge = f'<span class="status-badge {day_css}">{day_st}</span>'
+
+        day_hidden_cls = "" if month_open else " hidden"
+        rows += (f'<tr class="day-header{day_hidden_cls}" data-parent="{gid}" data-gid="{did}"'
+                 f' onclick="toggleGroup(\'{did}\')">'
+                 f'<td colspan="2" style="padding-left:32px"><span class="arrow" id="arrow-{did}">{day_arrow}</span>'
+                 f' {date_short} <span class="group-count">{len(runs)}건</span></td>'
+                 f'<td>{day_badge}</td></tr>\n')
+
+        for entry, time_display in runs:
+            is_new = entry == current_run
+            new_badge = '<span class="badge-new">최신</span>' if is_new else ''
+            run_hidden_cls = "" if (month_open and day_open) else " hidden"
+            row_cls = "run-row" + run_hidden_cls + (" row-new" if is_new else "")
+            st = statuses.get(entry, 'UNKNOWN')
+            label, css = STATUS_MAP.get(st, ('?', 'status-unknown'))
+            status_html = f'<span class="status-badge {css}">{label}</span>'
+            rows += (f'<tr class="{row_cls}" data-parent="{did}">'
+                     f'<td class="time-cell" style="padding-left:48px"><a href="{entry}/">{date_short} {time_display}</a></td>'
+                     f'<td>{status_html}</td><td>{new_badge}</td></tr>\n')
 
 cur_date, cur_time = current_run.split('_')
 cur_display = f"{cur_date} {cur_time.replace('-', ':')}"
@@ -147,13 +173,17 @@ css = """
     .sum-warn { background: #fff8c5; color: #9a6700; }
     .card { background: white; border: 1px solid #d0d7de; border-radius: 8px; overflow: hidden; margin-bottom: 20px; }
     table { width: 100%; border-collapse: collapse; }
-    .date-header td { background: #f6f8fa; padding: 8px 16px; font-size: .78rem; font-weight: 700;
-                      color: #57606a; letter-spacing: .06em; border-bottom: 1px solid #d0d7de;
-                      border-top: 2px solid #d0d7de; }
-    .date-header:first-child td { border-top: none; }
+    .month-header td { background: #f6f8fa; padding: 8px 16px; font-size: .78rem; font-weight: 700;
+                       color: #57606a; letter-spacing: .06em; border-bottom: 1px solid #d0d7de;
+                       border-top: 2px solid #d0d7de; cursor: pointer; user-select: none; }
+    .month-header:first-child td { border-top: none; }
+    .month-header td:hover { background: #eaeef2 !important; }
+    .day-header td { background: #fafbfc; padding: 7px 16px; font-size: .8rem; font-weight: 600;
+                     color: #57606a; border-bottom: 1px solid #eaecef; cursor: pointer; user-select: none; }
+    .day-header td:hover { background: #f0f3f6 !important; }
     td { padding: 10px 16px; border-bottom: 1px solid #f0f0f0; font-size: .9rem; }
     tr:last-child td { border-bottom: none; }
-    tr:not(.date-header):hover td { background: #f6f8fa; }
+    tr:not(.month-header):not(.day-header):hover td { background: #f6f8fa; }
     .time-cell { padding-left: 28px; width: 100%; }
     a { color: #0969da; text-decoration: none; font-weight: 500; }
     a:hover { text-decoration: underline; }
@@ -177,8 +207,6 @@ css = """
     .bar { height: 12px; border-radius: 3px; min-width: 2px; transition: width .3s; }
     .bar-val { font-size: .72rem; color: #57606a; white-space: nowrap; }
     .footer { text-align: center; color: #8c959f; font-size: .8rem; margin-top: 16px; }
-    .date-header td { cursor: pointer; user-select: none; }
-    .date-header td:hover { background: #eaeef2 !important; }
     .arrow { font-size: .65rem; margin-right: 6px; display: inline-block; transition: transform .2s; }
     .group-count { font-size: .72rem; color: #8c959f; font-weight: 400; margin-left: 6px; }
     .hidden { display: none; }
@@ -213,12 +241,30 @@ html = f"""<!DOCTYPE html>
     <p class="footer">최근 실행: {cur_display} (KST)</p>
   </div>
 <script>
-function toggleGroup(gid) {{
-  var rows = document.querySelectorAll('.group-row.' + gid);
-  var arrow = document.getElementById('arrow-' + gid);
-  var isHidden = rows.length > 0 && rows[0].classList.contains('hidden');
-  rows.forEach(function(r) {{ r.classList.toggle('hidden', !isHidden); }});
-  if (arrow) arrow.textContent = isHidden ? '▼' : '▶';
+function toggleGroup(id) {{
+  var children = document.querySelectorAll('[data-parent="' + id + '"]');
+  if (children.length === 0) return;
+  var nowOpen = children[0].classList.contains('hidden');
+  var arrow = document.getElementById('arrow-' + id);
+  if (arrow) arrow.textContent = nowOpen ? '▼' : '▶';
+  children.forEach(function(r) {{
+    if (nowOpen) {{
+      r.classList.remove('hidden');
+    }} else {{
+      r.classList.add('hidden');
+      var childGid = r.dataset.gid;
+      if (childGid) collapseGroup(childGid);
+    }}
+  }});
+}}
+function collapseGroup(id) {{
+  var arrow = document.getElementById('arrow-' + id);
+  if (arrow) arrow.textContent = '▶';
+  document.querySelectorAll('[data-parent="' + id + '"]').forEach(function(r) {{
+    r.classList.add('hidden');
+    var childGid = r.dataset.gid;
+    if (childGid) collapseGroup(childGid);
+  }});
 }}
 </script>
 </body>
