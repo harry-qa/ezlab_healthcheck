@@ -37,19 +37,22 @@ STATUS_MAP = {
 grouped = defaultdict(list)
 for entry in entries:
     date, time_str = entry.split('_')
-    grouped[date].append((entry, time_str.replace('-', ':')))
+    month = date[:7]
+    grouped[month].append((entry, date, time_str.replace('-', ':')))
 
-sorted_dates = sorted(grouped.keys(), reverse=True)
+sorted_months = sorted(grouped.keys(), reverse=True)
 
 rows = ""
-for idx, date in enumerate(sorted_dates):
-    runs = grouped[date]
-    gid = f"g{date}"
+for idx, month in enumerate(sorted_months):
+    runs = grouped[month]
+    gid = f"g{month.replace('-', '')}"
     is_open = (idx == 0)
     arrow_char = "▼" if is_open else "▶"
     hidden_cls = "" if is_open else " hidden"
-    rows += f'<tr class="date-header" onclick="toggleGroup(\'{gid}\')" ><td colspan="3"><span class="arrow" id="arrow-{gid}">{arrow_char}</span> {date} <span class="group-count">{len(runs)}건</span></td></tr>\n'
-    for entry, time_display in runs:
+    year, mon = month.split('-')
+    month_label = f"{year}년 {int(mon)}월"
+    rows += f'<tr class="date-header" onclick="toggleGroup(\'{gid}\')" ><td colspan="3"><span class="arrow" id="arrow-{gid}">{arrow_char}</span> {month_label} <span class="group-count">{len(runs)}건</span></td></tr>\n'
+    for entry, date, time_display in runs:
         is_new = entry == current_run
         new_badge = '<span class="badge-new">최신</span>' if is_new else ''
         classes = f"group-row {gid}{hidden_cls}"
@@ -57,7 +60,9 @@ for idx, date in enumerate(sorted_dates):
         st = statuses.get(entry, 'UNKNOWN')
         label, css = STATUS_MAP.get(st, ('?', 'status-unknown'))
         status_html = f'<span class="status-badge {css}">{label}</span>'
-        rows += f'<tr class="{classes}"><td class="time-cell"><a href="{entry}/">{time_display}</a></td><td>{status_html}</td><td>{new_badge}</td></tr>\n'
+        date_parts = date.split('-')
+        date_short = f"{date_parts[1]}/{date_parts[2]}"
+        rows += f'<tr class="{classes}"><td class="time-cell"><a href="{entry}/">{date_short} {time_display}</a></td><td>{status_html}</td><td>{new_badge}</td></tr>\n'
 
 cur_date, cur_time = current_run.split('_')
 cur_display = f"{cur_date} {cur_time.replace('-', ':')}"
