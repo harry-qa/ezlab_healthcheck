@@ -131,8 +131,9 @@ for lang in LANGS:
 
     bars_html = ""
     for run, t in times:
-        _, time_str = run.split('_')
-        display_time = time_str.replace('-', ':')
+        date_str, time_str = run.split('_')
+        dp = date_str.split('-')
+        display_time = f"{dp[1]}/{dp[2]} {time_str.replace('-', ':')}"
         width = bar_width(t, max_t)
         color = bar_color(t)
         tip = f"{display_time} · {t}ms" if t > 0 else f"{display_time} · -"
@@ -202,7 +203,7 @@ css = """
     .trend-group:last-child { margin-bottom: 0; }
     .trend-lang { font-size: .75rem; font-weight: 600; color: #57606a; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .04em; }
     .bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-    .bar-label { font-size: .72rem; color: #8c959f; width: 38px; flex-shrink: 0; text-align: right; }
+    .bar-label { font-size: .72rem; color: #8c959f; width: 80px; flex-shrink: 0; text-align: right; }
     .bar-wrap { flex: 1; display: flex; align-items: center; gap: 6px; }
     .bar { height: 12px; border-radius: 3px; min-width: 2px; transition: width .3s; }
     .bar-val { font-size: .72rem; color: #57606a; white-space: nowrap; }
