@@ -47,7 +47,7 @@
     .trend-group:last-child { margin-bottom: 0; }
     .trend-lang { font-size: .75rem; font-weight: 600; color: #57606a; margin-bottom: 6px; text-transform: uppercase; letter-spacing: .04em; }
     .bar-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-    .bar-label { font-size: .72rem; color: #8c959f; width: 38px; flex-shrink: 0; text-align: right; }
+    .bar-label { font-size: .72rem; color: #8c959f; width: 80px; flex-shrink: 0; text-align: right; }
     .bar-wrap { flex: 1; display: flex; align-items: center; gap: 6px; }
     .bar { height: 12px; border-radius: 3px; min-width: 2px; transition: width .3s; }
     .bar-val { font-size: .72rem; color: #57606a; white-space: nowrap; }
@@ -61,7 +61,7 @@
   <div class="container">
     <header>
       <h1>이지랩 헬스체크 리포트</h1>
-      <p class="subtitle">총 180개 리포트 &nbsp;·&nbsp; 하루 6회 자동 실행</p>
+      <p class="subtitle">총 180개 리포트 &nbsp;·&nbsp; 하루 24회 자동 실행</p>
       <div class="summary">
         <span class="sum-badge sum-pass">PASS 171</span>
         <span class="sum-badge sum-fail">FAIL 0</span>
@@ -71,9 +71,10 @@
     <div class="card">
       <table>
         <tbody>
-<tr class="month-header" data-gid="g202605" onclick="toggleGroup('g202605')"><td colspan="3"><span class="arrow" id="arrow-g202605">▼</span> 2026년 5월 <span class="group-count">67건</span></td></tr>
-<tr class="day-header" data-parent="g202605" data-gid="d20260511" onclick="toggleGroup('d20260511')"><td colspan="2" style="padding-left:32px"><span class="arrow" id="arrow-d20260511">▶</span> 05/11 <span class="group-count">4건</span></td><td><span class="status-badge status-pass">PASS</span></td></tr>
-<tr class="run-row hidden row-new" data-parent="d20260511"><td class="time-cell" style="padding-left:48px"><a href="2026-05-11_15-30/">05/11 15:30</a></td><td><span class="status-badge status-pass">PASS</span></td><td><span class="badge-new">최신</span></td></tr>
+<tr class="month-header" data-gid="g202605" onclick="toggleGroup('g202605')"><td colspan="3"><span class="arrow" id="arrow-g202605">▼</span> 2026년 5월 <span class="group-count">68건</span></td></tr>
+<tr class="day-header" data-parent="g202605" data-gid="d20260511" onclick="toggleGroup('d20260511')"><td colspan="2" style="padding-left:32px"><span class="arrow" id="arrow-d20260511">▶</span> 05/11 <span class="group-count">5건</span></td><td><span class="status-badge status-pass">PASS</span></td></tr>
+<tr class="run-row hidden row-new" data-parent="d20260511"><td class="time-cell" style="padding-left:48px"><a href="2026-05-11_17-50/">05/11 17:50</a></td><td><span class="status-badge status-pass">PASS</span></td><td><span class="badge-new">최신</span></td></tr>
+<tr class="run-row hidden" data-parent="d20260511"><td class="time-cell" style="padding-left:48px"><a href="2026-05-11_15-30/">05/11 15:30</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
 <tr class="run-row hidden" data-parent="d20260511"><td class="time-cell" style="padding-left:48px"><a href="2026-05-11_11-51/">05/11 11:51</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
 <tr class="run-row hidden" data-parent="d20260511"><td class="time-cell" style="padding-left:48px"><a href="2026-05-11_05-47/">05/11 05:47</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
 <tr class="run-row hidden" data-parent="d20260511"><td class="time-cell" style="padding-left:48px"><a href="2026-05-11_01-49/">05/11 01:49</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
@@ -150,7 +151,7 @@
 <tr class="run-row hidden" data-parent="d20260501"><td class="time-cell" style="padding-left:48px"><a href="2026-05-01_11-49/">05/01 11:49</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
 <tr class="run-row hidden" data-parent="d20260501"><td class="time-cell" style="padding-left:48px"><a href="2026-05-01_06-01/">05/01 06:01</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
 <tr class="run-row hidden" data-parent="d20260501"><td class="time-cell" style="padding-left:48px"><a href="2026-05-01_02-17/">05/01 02:17</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
-<tr class="month-header" data-gid="g202604" onclick="toggleGroup('g202604')"><td colspan="3"><span class="arrow" id="arrow-g202604">▶</span> 2026년 4월 <span class="group-count">113건</span></td></tr>
+<tr class="month-header" data-gid="g202604" onclick="toggleGroup('g202604')"><td colspan="3"><span class="arrow" id="arrow-g202604">▶</span> 2026년 4월 <span class="group-count">112건</span></td></tr>
 <tr class="day-header hidden" data-parent="g202604" data-gid="d20260430" onclick="toggleGroup('d20260430')"><td colspan="2" style="padding-left:32px"><span class="arrow" id="arrow-d20260430">▶</span> 04/30 <span class="group-count">6건</span></td><td><span class="status-badge status-pass">PASS</span></td></tr>
 <tr class="run-row hidden" data-parent="d20260430"><td class="time-cell" style="padding-left:48px"><a href="2026-04-30_20-42/">04/30 20:42</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
 <tr class="run-row hidden" data-parent="d20260430"><td class="time-cell" style="padding-left:48px"><a href="2026-04-30_17-07/">04/30 17:07</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
@@ -274,13 +275,12 @@
 <tr class="run-row hidden" data-parent="d20260415"><td class="time-cell" style="padding-left:48px"><a href="2026-04-15_10-55/">04/15 10:55</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
 <tr class="run-row hidden" data-parent="d20260415"><td class="time-cell" style="padding-left:48px"><a href="2026-04-15_05-52/">04/15 05:52</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
 <tr class="run-row hidden" data-parent="d20260415"><td class="time-cell" style="padding-left:48px"><a href="2026-04-15_02-00/">04/15 02:00</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
-<tr class="day-header hidden" data-parent="g202604" data-gid="d20260414" onclick="toggleGroup('d20260414')"><td colspan="2" style="padding-left:32px"><span class="arrow" id="arrow-d20260414">▶</span> 04/14 <span class="group-count">6건</span></td><td><span class="status-badge status-pass">PASS</span></td></tr>
+<tr class="day-header hidden" data-parent="g202604" data-gid="d20260414" onclick="toggleGroup('d20260414')"><td colspan="2" style="padding-left:32px"><span class="arrow" id="arrow-d20260414">▶</span> 04/14 <span class="group-count">5건</span></td><td><span class="status-badge status-pass">PASS</span></td></tr>
 <tr class="run-row hidden" data-parent="d20260414"><td class="time-cell" style="padding-left:48px"><a href="2026-04-14_20-19/">04/14 20:19</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
 <tr class="run-row hidden" data-parent="d20260414"><td class="time-cell" style="padding-left:48px"><a href="2026-04-14_16-18/">04/14 16:18</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
 <tr class="run-row hidden" data-parent="d20260414"><td class="time-cell" style="padding-left:48px"><a href="2026-04-14_14-16/">04/14 14:16</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
 <tr class="run-row hidden" data-parent="d20260414"><td class="time-cell" style="padding-left:48px"><a href="2026-04-14_11-11/">04/14 11:11</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
 <tr class="run-row hidden" data-parent="d20260414"><td class="time-cell" style="padding-left:48px"><a href="2026-04-14_05-52/">04/14 05:52</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
-<tr class="run-row hidden" data-parent="d20260414"><td class="time-cell" style="padding-left:48px"><a href="2026-04-14_01-58/">04/14 01:58</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
         </tbody>
       </table>
     </div>
@@ -292,87 +292,87 @@
         <div class="trend-lang">한국어 (/ko)</div>
         
         <div class="bar-row">
-          <span class="bar-label">15:30</span>
+          <span class="bar-label">05/11 17:50</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:73%;background:#2da44e" title="15:30 · 734ms"></div>
+            <div class="bar" style="width:94%;background:#2da44e" title="05/11 17:50 · 946ms"></div>
+            <span class="bar-val">946ms</span>
+          </div>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">05/11 15:30</span>
+          <div class="bar-wrap">
+            <div class="bar" style="width:73%;background:#2da44e" title="05/11 15:30 · 734ms"></div>
             <span class="bar-val">734ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">11:51</span>
+          <span class="bar-label">05/11 11:51</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:84%;background:#2da44e" title="11:51 · 843ms"></div>
+            <div class="bar" style="width:84%;background:#2da44e" title="05/11 11:51 · 843ms"></div>
             <span class="bar-val">843ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">05:47</span>
+          <span class="bar-label">05/11 05:47</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:91%;background:#2da44e" title="05:47 · 917ms"></div>
+            <div class="bar" style="width:91%;background:#2da44e" title="05/11 05:47 · 917ms"></div>
             <span class="bar-val">917ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">01:49</span>
+          <span class="bar-label">05/11 01:49</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:83%;background:#2da44e" title="01:49 · 839ms"></div>
+            <div class="bar" style="width:83%;background:#2da44e" title="05/11 01:49 · 839ms"></div>
             <span class="bar-val">839ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">20:06</span>
+          <span class="bar-label">05/10 20:06</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:100%;background:#bf8700" title="20:06 · 1008ms"></div>
+            <div class="bar" style="width:100%;background:#bf8700" title="05/10 20:06 · 1008ms"></div>
             <span class="bar-val">1008ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">16:59</span>
+          <span class="bar-label">05/10 16:59</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:79%;background:#2da44e" title="16:59 · 792ms"></div>
+            <div class="bar" style="width:79%;background:#2da44e" title="05/10 16:59 · 792ms"></div>
             <span class="bar-val">792ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">14:59</span>
+          <span class="bar-label">05/10 14:59</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:92%;background:#2da44e" title="14:59 · 927ms"></div>
+            <div class="bar" style="width:92%;background:#2da44e" title="05/10 14:59 · 927ms"></div>
             <span class="bar-val">927ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">11:42</span>
+          <span class="bar-label">05/10 11:42</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:72%;background:#2da44e" title="11:42 · 726ms"></div>
+            <div class="bar" style="width:72%;background:#2da44e" title="05/10 11:42 · 726ms"></div>
             <span class="bar-val">726ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">05:45</span>
+          <span class="bar-label">05/10 05:45</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:89%;background:#2da44e" title="05:45 · 899ms"></div>
+            <div class="bar" style="width:89%;background:#2da44e" title="05/10 05:45 · 899ms"></div>
             <span class="bar-val">899ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">01:49</span>
+          <span class="bar-label">05/10 01:49</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:83%;background:#2da44e" title="01:49 · 840ms"></div>
+            <div class="bar" style="width:83%;background:#2da44e" title="05/10 01:49 · 840ms"></div>
             <span class="bar-val">840ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">20:03</span>
+          <span class="bar-label">05/09 20:03</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:90%;background:#2da44e" title="20:03 · 909ms"></div>
+            <div class="bar" style="width:90%;background:#2da44e" title="05/09 20:03 · 909ms"></div>
             <span class="bar-val">909ms</span>
-          </div>
-        </div>
-        <div class="bar-row">
-          <span class="bar-label">16:37</span>
-          <div class="bar-wrap">
-            <div class="bar" style="width:86%;background:#2da44e" title="16:37 · 862ms"></div>
-            <span class="bar-val">862ms</span>
           </div>
         </div>
       </div>
@@ -380,87 +380,87 @@
         <div class="trend-lang">영어 (/en)</div>
         
         <div class="bar-row">
-          <span class="bar-label">15:30</span>
+          <span class="bar-label">05/11 17:50</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:22%;background:#2da44e" title="15:30 · 163ms"></div>
+            <div class="bar" style="width:98%;background:#2da44e" title="05/11 17:50 · 738ms"></div>
+            <span class="bar-val">738ms</span>
+          </div>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">05/11 15:30</span>
+          <div class="bar-wrap">
+            <div class="bar" style="width:22%;background:#2da44e" title="05/11 15:30 · 163ms"></div>
             <span class="bar-val">163ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">11:51</span>
+          <span class="bar-label">05/11 11:51</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:30%;background:#2da44e" title="11:51 · 224ms"></div>
+            <div class="bar" style="width:30%;background:#2da44e" title="05/11 11:51 · 224ms"></div>
             <span class="bar-val">224ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">05:47</span>
+          <span class="bar-label">05/11 05:47</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:93%;background:#2da44e" title="05:47 · 703ms"></div>
+            <div class="bar" style="width:93%;background:#2da44e" title="05/11 05:47 · 703ms"></div>
             <span class="bar-val">703ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">01:49</span>
+          <span class="bar-label">05/11 01:49</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:86%;background:#2da44e" title="01:49 · 648ms"></div>
+            <div class="bar" style="width:86%;background:#2da44e" title="05/11 01:49 · 648ms"></div>
             <span class="bar-val">648ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">20:06</span>
+          <span class="bar-label">05/10 20:06</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:100%;background:#2da44e" title="20:06 · 755ms"></div>
+            <div class="bar" style="width:100%;background:#2da44e" title="05/10 20:06 · 755ms"></div>
             <span class="bar-val">755ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">16:59</span>
+          <span class="bar-label">05/10 16:59</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:72%;background:#2da44e" title="16:59 · 543ms"></div>
+            <div class="bar" style="width:72%;background:#2da44e" title="05/10 16:59 · 543ms"></div>
             <span class="bar-val">543ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">14:59</span>
+          <span class="bar-label">05/10 14:59</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:30%;background:#2da44e" title="14:59 · 227ms"></div>
+            <div class="bar" style="width:30%;background:#2da44e" title="05/10 14:59 · 227ms"></div>
             <span class="bar-val">227ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">11:42</span>
+          <span class="bar-label">05/10 11:42</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:70%;background:#2da44e" title="11:42 · 532ms"></div>
+            <div class="bar" style="width:70%;background:#2da44e" title="05/10 11:42 · 532ms"></div>
             <span class="bar-val">532ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">05:45</span>
+          <span class="bar-label">05/10 05:45</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:28%;background:#2da44e" title="05:45 · 212ms"></div>
+            <div class="bar" style="width:28%;background:#2da44e" title="05/10 05:45 · 212ms"></div>
             <span class="bar-val">212ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">01:49</span>
+          <span class="bar-label">05/10 01:49</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:92%;background:#2da44e" title="01:49 · 691ms"></div>
+            <div class="bar" style="width:92%;background:#2da44e" title="05/10 01:49 · 691ms"></div>
             <span class="bar-val">691ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">20:03</span>
+          <span class="bar-label">05/09 20:03</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:79%;background:#2da44e" title="20:03 · 595ms"></div>
+            <div class="bar" style="width:79%;background:#2da44e" title="05/09 20:03 · 595ms"></div>
             <span class="bar-val">595ms</span>
-          </div>
-        </div>
-        <div class="bar-row">
-          <span class="bar-label">16:37</span>
-          <div class="bar-wrap">
-            <div class="bar" style="width:28%;background:#2da44e" title="16:37 · 209ms"></div>
-            <span class="bar-val">209ms</span>
           </div>
         </div>
       </div>
@@ -468,87 +468,87 @@
         <div class="trend-lang">일본어 (/jp)</div>
         
         <div class="bar-row">
-          <span class="bar-label">15:30</span>
+          <span class="bar-label">05/11 17:50</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:88%;background:#2da44e" title="15:30 · 651ms"></div>
+            <div class="bar" style="width:28%;background:#2da44e" title="05/11 17:50 · 208ms"></div>
+            <span class="bar-val">208ms</span>
+          </div>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">05/11 15:30</span>
+          <div class="bar-wrap">
+            <div class="bar" style="width:88%;background:#2da44e" title="05/11 15:30 · 651ms"></div>
             <span class="bar-val">651ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">11:51</span>
+          <span class="bar-label">05/11 11:51</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:90%;background:#2da44e" title="11:51 · 667ms"></div>
+            <div class="bar" style="width:90%;background:#2da44e" title="05/11 11:51 · 667ms"></div>
             <span class="bar-val">667ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">05:47</span>
+          <span class="bar-label">05/11 05:47</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:31%;background:#2da44e" title="05:47 · 231ms"></div>
+            <div class="bar" style="width:31%;background:#2da44e" title="05/11 05:47 · 231ms"></div>
             <span class="bar-val">231ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">01:49</span>
+          <span class="bar-label">05/11 01:49</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:26%;background:#2da44e" title="01:49 · 196ms"></div>
+            <div class="bar" style="width:26%;background:#2da44e" title="05/11 01:49 · 196ms"></div>
             <span class="bar-val">196ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">20:06</span>
+          <span class="bar-label">05/10 20:06</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:30%;background:#2da44e" title="20:06 · 219ms"></div>
+            <div class="bar" style="width:30%;background:#2da44e" title="05/10 20:06 · 219ms"></div>
             <span class="bar-val">219ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">16:59</span>
+          <span class="bar-label">05/10 16:59</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:25%;background:#2da44e" title="16:59 · 186ms"></div>
+            <div class="bar" style="width:25%;background:#2da44e" title="05/10 16:59 · 186ms"></div>
             <span class="bar-val">186ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">14:59</span>
+          <span class="bar-label">05/10 14:59</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:100%;background:#2da44e" title="14:59 · 741ms"></div>
+            <div class="bar" style="width:100%;background:#2da44e" title="05/10 14:59 · 741ms"></div>
             <span class="bar-val">741ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">11:42</span>
+          <span class="bar-label">05/10 11:42</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:22%;background:#2da44e" title="11:42 · 161ms"></div>
+            <div class="bar" style="width:22%;background:#2da44e" title="05/10 11:42 · 161ms"></div>
             <span class="bar-val">161ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">05:45</span>
+          <span class="bar-label">05/10 05:45</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:93%;background:#2da44e" title="05:45 · 687ms"></div>
+            <div class="bar" style="width:93%;background:#2da44e" title="05/10 05:45 · 687ms"></div>
             <span class="bar-val">687ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">01:49</span>
+          <span class="bar-label">05/10 01:49</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:27%;background:#2da44e" title="01:49 · 199ms"></div>
+            <div class="bar" style="width:27%;background:#2da44e" title="05/10 01:49 · 199ms"></div>
             <span class="bar-val">199ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">20:03</span>
+          <span class="bar-label">05/09 20:03</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:23%;background:#2da44e" title="20:03 · 168ms"></div>
+            <div class="bar" style="width:23%;background:#2da44e" title="05/09 20:03 · 168ms"></div>
             <span class="bar-val">168ms</span>
-          </div>
-        </div>
-        <div class="bar-row">
-          <span class="bar-label">16:37</span>
-          <div class="bar-wrap">
-            <div class="bar" style="width:95%;background:#2da44e" title="16:37 · 703ms"></div>
-            <span class="bar-val">703ms</span>
           </div>
         </div>
       </div>
@@ -556,92 +556,92 @@
         <div class="trend-lang">중국어 (/tw)</div>
         
         <div class="bar-row">
-          <span class="bar-label">15:30</span>
+          <span class="bar-label">05/11 17:50</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:22%;background:#2da44e" title="15:30 · 168ms"></div>
+            <div class="bar" style="width:98%;background:#2da44e" title="05/11 17:50 · 763ms"></div>
+            <span class="bar-val">763ms</span>
+          </div>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label">05/11 15:30</span>
+          <div class="bar-wrap">
+            <div class="bar" style="width:22%;background:#2da44e" title="05/11 15:30 · 168ms"></div>
             <span class="bar-val">168ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">11:51</span>
+          <span class="bar-label">05/11 11:51</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:89%;background:#2da44e" title="11:51 · 690ms"></div>
+            <div class="bar" style="width:89%;background:#2da44e" title="05/11 11:51 · 690ms"></div>
             <span class="bar-val">690ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">05:47</span>
+          <span class="bar-label">05/11 05:47</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:92%;background:#2da44e" title="05:47 · 714ms"></div>
+            <div class="bar" style="width:92%;background:#2da44e" title="05/11 05:47 · 714ms"></div>
             <span class="bar-val">714ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">01:49</span>
+          <span class="bar-label">05/11 01:49</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:89%;background:#2da44e" title="01:49 · 694ms"></div>
+            <div class="bar" style="width:89%;background:#2da44e" title="05/11 01:49 · 694ms"></div>
             <span class="bar-val">694ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">20:06</span>
+          <span class="bar-label">05/10 20:06</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:97%;background:#2da44e" title="20:06 · 758ms"></div>
+            <div class="bar" style="width:97%;background:#2da44e" title="05/10 20:06 · 758ms"></div>
             <span class="bar-val">758ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">16:59</span>
+          <span class="bar-label">05/10 16:59</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:75%;background:#2da44e" title="16:59 · 581ms"></div>
+            <div class="bar" style="width:75%;background:#2da44e" title="05/10 16:59 · 581ms"></div>
             <span class="bar-val">581ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">14:59</span>
+          <span class="bar-label">05/10 14:59</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:100%;background:#2da44e" title="14:59 · 778ms"></div>
+            <div class="bar" style="width:100%;background:#2da44e" title="05/10 14:59 · 778ms"></div>
             <span class="bar-val">778ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">11:42</span>
+          <span class="bar-label">05/10 11:42</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:85%;background:#2da44e" title="11:42 · 659ms"></div>
+            <div class="bar" style="width:85%;background:#2da44e" title="05/10 11:42 · 659ms"></div>
             <span class="bar-val">659ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">05:45</span>
+          <span class="bar-label">05/10 05:45</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:94%;background:#2da44e" title="05:45 · 732ms"></div>
+            <div class="bar" style="width:94%;background:#2da44e" title="05/10 05:45 · 732ms"></div>
             <span class="bar-val">732ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">01:49</span>
+          <span class="bar-label">05/10 01:49</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:86%;background:#2da44e" title="01:49 · 668ms"></div>
+            <div class="bar" style="width:86%;background:#2da44e" title="05/10 01:49 · 668ms"></div>
             <span class="bar-val">668ms</span>
           </div>
         </div>
         <div class="bar-row">
-          <span class="bar-label">20:03</span>
+          <span class="bar-label">05/09 20:03</span>
           <div class="bar-wrap">
-            <div class="bar" style="width:97%;background:#2da44e" title="20:03 · 755ms"></div>
+            <div class="bar" style="width:97%;background:#2da44e" title="05/09 20:03 · 755ms"></div>
             <span class="bar-val">755ms</span>
-          </div>
-        </div>
-        <div class="bar-row">
-          <span class="bar-label">16:37</span>
-          <div class="bar-wrap">
-            <div class="bar" style="width:85%;background:#2da44e" title="16:37 · 661ms"></div>
-            <span class="bar-val">661ms</span>
           </div>
         </div>
       </div>
     </div>
-    <p class="footer">최근 실행: 2026-05-11 15:30 (KST)</p>
+    <p class="footer">최근 실행: 2026-05-11 17:50 (KST)</p>
   </div>
 <script>
 function toggleGroup(id) {
