@@ -224,7 +224,7 @@ html = f"""<!DOCTYPE html>
   <div class="container">
     <header>
       <h1>이지랩 헬스체크 리포트</h1>
-      <p class="subtitle">총 {total}개 리포트 &nbsp;·&nbsp; 하루 6회 자동 실행</p>
+      <p class="subtitle">총 {total}개 리포트 &nbsp;·&nbsp; 하루 24회 자동 실행</p>
       <div class="summary">
         <span class="sum-badge sum-pass">PASS {pass_c}</span>
         <span class="sum-badge sum-fail">FAIL {fail_c}</span>
