@@ -2,18 +2,7 @@ name: 이지랩 헬스체크
 
 on:
   schedule:
-    - cron: '30 15 * * *'  # KST 00:30
-    - cron: '30 17 * * *'  # KST 02:30
-    - cron: '30 19 * * *'  # KST 04:30
-    - cron: '30 21 * * *'  # KST 06:30
-    - cron: '30 23 * * *'  # KST 08:30
-    - cron: '30 1 * * *'   # KST 10:30
-    - cron: '30 3 * * *'   # KST 12:30
-    - cron: '30 5 * * *'   # KST 14:30
-    - cron: '30 7 * * *'   # KST 16:30
-    - cron: '30 9 * * *'   # KST 18:30
-    - cron: '30 11 * * *'  # KST 20:30
-    - cron: '30 13 * * *'  # KST 22:30
+    - cron: '0 * * * *'  # 매시 정각 (KST 기준 24회/일)
   workflow_dispatch:
 
 permissions:
