@@ -10,9 +10,10 @@ runs_file    = sys.argv[1]
 current_run  = sys.argv[2]
 statuses_file= sys.argv[3]
 perf_file    = sys.argv[4]
-monthly_file = sys.argv[5]
-daily_file   = sys.argv[6]
-output_file  = sys.argv[7]
+monthly_file  = sys.argv[5]
+daily_file    = sys.argv[6]
+failures_file = sys.argv[7]
+output_file   = sys.argv[8]
 
 # ── Load data ─────────────────────────────────────────────────────────
 with open(runs_file) as f:
@@ -28,10 +29,11 @@ def load_json(path, default):
     except Exception:
         return default
 
-statuses      = load_json(statuses_file, {})
-perf_history  = load_json(perf_file, {})
-monthly_stats = load_json(monthly_file, {})
-daily_stats   = load_json(daily_file, {})
+statuses         = load_json(statuses_file, {})
+perf_history     = load_json(perf_file, {})
+monthly_stats    = load_json(monthly_file, {})
+daily_stats      = load_json(daily_file, {})
+failures_history = load_json(failures_file, {})
 
 # ── Constants ─────────────────────────────────────────────────────────
 LANGS       = ['ko', 'en', 'jp', 'tw']
@@ -358,6 +360,47 @@ for midx, month in enumerate(sorted_months_list):
                 f'</div>'
             ) if perf_rows else ''
 
+            # 장애 상세 섹션
+            run_failures = failures_history.get(entry, [])
+            failure_section = ''
+            if run_failures:
+                type_icons = {
+                    '서버': '🖥️', 'API': '🔌', '다운로드': '📥',
+                    '파일': '📄', '콘텐츠': '📝', '이미지': '🖼️',
+                    '로그인': '🔑', 'UI': '🖱️',
+                }
+                f_rows = ''
+                for fr in run_failures:
+                    icon     = type_icons.get(fr.get('type', ''), '⚠️')
+                    f_url    = fr.get('url', '-')
+                    f_status = fr.get('status', 0)
+                    f_time   = fr.get('responseTime', 0)
+                    f_sym    = fr.get('symptom', '-')
+                    f_step   = fr.get('step', '-')
+                    f_lang   = fr.get('lang', '-')
+                    status_cls = 'fs-5xx' if f_status >= 500 else ('fs-4xx' if f_status >= 400 else 'fs-other')
+                    status_txt = str(f_status) if f_status > 0 else 'timeout'
+                    time_txt   = f'{f_time}ms' if f_time > 0 else '—'
+                    f_rows += (
+                        f'<tr>'
+                        f'<td class="fd-icon">{icon}</td>'
+                        f'<td class="fd-step">{f_step}</td>'
+                        f'<td class="fd-lang">{f_lang}</td>'
+                        f'<td class="fd-url" title="{f_url}">{f_url}</td>'
+                        f'<td class="fd-status {status_cls}">{status_txt}</td>'
+                        f'<td class="fd-time">{time_txt}</td>'
+                        f'<td class="fd-sym">{f_sym}</td>'
+                        f'</tr>'
+                    )
+                failure_section = (
+                    f'<div class="dp-section dp-failure">'
+                    f'<div class="dp-title dp-title-fail">장애 상세 <span class="dp-sub">{len(run_failures)}건</span></div>'
+                    f'<div class="fd-scroll">'
+                    f'<table class="fd-table"><tbody>{f_rows}</tbody></table>'
+                    f'</div>'
+                    f'</div>'
+                )
+
             rows_html += (
                 f'<tr class="run-row hidden{new_cls}" data-parent="{did}" data-status="{st}" data-eid="{eid}"'
                 f' onclick="toggleDetail(\'{eid}\')">'
@@ -370,6 +413,7 @@ for midx, month in enumerate(sorted_months_list):
                 f'<tr class="run-detail hidden" id="detail-{eid}">'
                 f'<td colspan="4">'
                 f'<div class="detail-panel">'
+                f'{failure_section}'
                 f'{perf_section}'
                 f'<div class="dp-section">'
                 f'<div class="dp-title">cURL 명령어 <span class="dp-sub">로컬에서 바로 테스트</span></div>'
@@ -560,6 +604,26 @@ css = """
   .curl-copy.copied { background: #1f3a1f; color: #3fb950; border-color: #2ea043; }
   .curl-ms { font-size: .72rem; color: #484f58; width: 54px; text-align: right; flex-shrink: 0; }
   .curl-ms.curl-time-slow { color: #f85149; font-weight: 700; }
+
+  /* Failure detail table */
+  .dp-failure { border-left: 2px solid #f85149; padding-left: 10px; }
+  .dp-title-fail { color: #f85149 !important; }
+  .fd-scroll { overflow-x: auto; }
+  .fd-table { border-collapse: collapse; font-size: .75rem; width: 100%; min-width: 520px; }
+  .fd-table tbody tr { border-bottom: 1px solid #1c2333; }
+  .fd-table tbody tr:last-child { border-bottom: none; }
+  .fd-table td { padding: 5px 8px; color: #8b949e; vertical-align: top; border-bottom: none; }
+  .fd-icon  { width: 20px; font-size: .85rem; padding-left: 0 !important; }
+  .fd-step  { color: #484f58; font-size: .68rem; white-space: nowrap; }
+  .fd-lang  { color: #58a6ff; font-weight: 700; font-size: .68rem; width: 30px; }
+  .fd-url   { color: #c9d1d9; font-family: 'SF Mono', Consolas, monospace; font-size: .7rem;
+              max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fd-status { font-weight: 700; font-size: .72rem; white-space: nowrap; }
+  .fs-5xx   { color: #f85149; }
+  .fs-4xx   { color: #d29922; }
+  .fs-other { color: #8b949e; }
+  .fd-time  { color: #484f58; font-size: .68rem; white-space: nowrap; }
+  .fd-sym   { color: #8b949e; font-size: .72rem; }
 
   .detail-report-btn { display: inline-block; margin-top: 4px; font-size: .75rem;
                        color: #58a6ff; border: 1px solid #21262d; border-radius: 6px;

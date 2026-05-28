@@ -676,7 +676,10 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   });
 
   // 인덱스 페이지 상태 배지용 파일 저장
-  fs.writeFileSync('report-status.json', JSON.stringify({ status, passCount, failCount, warnCount, serverTimes }));
+  fs.writeFileSync('report-status.json', JSON.stringify({
+    status, passCount, failCount, warnCount, serverTimes,
+    failures: failRecords.slice(0, 20),  // 최대 20건 보존
+  }));
 
   console.log(`\n${'═'.repeat(60)}`);
   console.log(`[DONE] 전체 점검 완료`);
