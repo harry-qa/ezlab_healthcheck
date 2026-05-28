@@ -2,6 +2,7 @@ import sys
 import re
 import json
 import math
+from datetime import datetime, timedelta
 from collections import defaultdict
 
 runs_file     = sys.argv[1]
@@ -9,7 +10,8 @@ current_run   = sys.argv[2]
 statuses_file = sys.argv[3]
 perf_file     = sys.argv[4]
 monthly_file  = sys.argv[5]
-output_file   = sys.argv[6]
+daily_file    = sys.argv[6]
+output_file   = sys.argv[7]
 
 with open(runs_file) as f:
     entries = sorted(
@@ -34,6 +36,12 @@ try:
         monthly_stats = json.load(f)
 except Exception:
     monthly_stats = {}
+
+try:
+    with open(daily_file) as f:
+        daily_stats = json.load(f)
+except Exception:
+    daily_stats = {}
 
 STATUS_MAP = {
     'PASS':    ('PASS', 'status-pass'),
@@ -198,6 +206,36 @@ def make_donut_svg(pass_c, warn_c, fail_c):
     center = f'<text x="50" y="55" text-anchor="middle" font-size="15" font-weight="700" fill="#24292f">{avail}%</text>'
     return f'<svg viewBox="0 0 100 100" width="90" height="90">{"".join(segments)}{center}</svg>'
 
+# ── 90일 일별 가동률 바 차트 ────────────────────────────────────────
+def make_daily_chart(daily_stats, current_run):
+    cur_date = datetime.strptime(current_run[:10], '%Y-%m-%d')
+    dates = [(cur_date - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(89, -1, -1)]
+
+    bar_w, gap, chart_h = 6, 1, 60
+    total_w = len(dates) * (bar_w + gap)
+    total_h = chart_h + 18
+
+    bars = []
+    for i, date in enumerate(dates):
+        d = daily_stats.get(date, {})
+        p, w, f_ = d.get('PASS', 0), d.get('WARN', 0), d.get('FAIL', 0)
+        total = p + w + f_
+        x = i * (bar_w + gap)
+        if total == 0:
+            bars.append(f'<rect x="{x}" y="{chart_h - 3}" width="{bar_w}" height="3" fill="#d0d7de" rx="1"/>')
+        else:
+            h = max(4, round(p / total * chart_h))
+            color = '#cf222e' if f_ > 0 else ('#d4a72c' if w > 0 else '#2da44e')
+            tip = f"{date}  PASS {p}  WARN {w}  FAIL {f_}"
+            bars.append(f'<rect x="{x}" y="{chart_h - h}" width="{bar_w}" height="{h}" fill="{color}" rx="1"><title>{tip}</title></rect>')
+        if i % 14 == 0:
+            lx = x + bar_w // 2
+            bars.append(f'<text x="{lx}" y="{chart_h + 13}" text-anchor="middle" font-size="8" fill="#8c959f">{date[5:]}</text>')
+
+    return f'<svg viewBox="0 0 {total_w} {total_h}" width="100%" style="display:block;overflow:visible">{"".join(bars)}</svg>'
+
+daily_chart_html = make_daily_chart(daily_stats, current_run)
+
 monthly_section = ""
 if monthly_stats:
     sorted_months = sorted(monthly_stats.keys(), reverse=True)
@@ -227,6 +265,18 @@ if monthly_stats:
       <div class="monthly-title">월별 헬스체크 요약</div>
       <div class="monthly-grid">{month_cards}
       </div>
+    </div>'''
+
+daily_section = f'''
+    <div class="daily-card">
+      <div class="daily-title">일별 가동률 <span class="trend-sub">최근 90일</span></div>
+      <div class="daily-legend">
+        <span class="dl-item dl-pass">PASS</span>
+        <span class="dl-item dl-warn">WARN 포함</span>
+        <span class="dl-item dl-fail">FAIL 포함</span>
+        <span class="dl-item dl-none">데이터 없음</span>
+      </div>
+      <div class="daily-chart">{daily_chart_html}</div>
     </div>'''
 
 css = """
@@ -289,6 +339,15 @@ css = """
     .leg-warn { background: #fff8c5; color: #9a6700; }
     .leg-fail { background: #ffebe9; color: #cf222e; }
     .month-card-total { font-size: .68rem; color: #8c959f; }
+    .daily-card { background: white; border: 1px solid #d0d7de; border-radius: 8px; padding: 16px 20px; margin-bottom: 20px; }
+    .daily-title { font-size: .9rem; font-weight: 700; color: #24292f; margin-bottom: 8px; }
+    .daily-legend { display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
+    .dl-item { font-size: .72rem; font-weight: 600; padding: 2px 8px; border-radius: 8px; }
+    .dl-pass { background: #dafbe1; color: #1a7f37; }
+    .dl-warn { background: #fff8c5; color: #9a6700; }
+    .dl-fail { background: #ffebe9; color: #cf222e; }
+    .dl-none { background: #f6f8fa; color: #8c959f; border: 1px solid #d0d7de; }
+    .daily-chart { padding: 4px 0 8px; }
     .arrow { font-size: .65rem; margin-right: 6px; display: inline-block; transition: transform .2s; }
     .group-count { font-size: .72rem; color: #8c959f; font-weight: 400; margin-left: 6px; }
     .hidden { display: none; }
@@ -319,6 +378,7 @@ html = f"""<!DOCTYPE html>
 {rows}        </tbody>
       </table>
     </div>
+{daily_section}
 {monthly_section}
 {trend_section}
     <p class="footer">최근 실행: {cur_display} (KST)</p>
