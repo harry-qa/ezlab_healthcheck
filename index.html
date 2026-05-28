@@ -52,6 +52,18 @@
     .bar { height: 12px; border-radius: 3px; min-width: 2px; transition: width .3s; }
     .bar-val { font-size: .72rem; color: #57606a; white-space: nowrap; }
     .footer { text-align: center; color: #8c959f; font-size: .8rem; margin-top: 16px; }
+    .monthly-card { background: white; border: 1px solid #d0d7de; border-radius: 8px; padding: 16px 20px; margin-bottom: 20px; }
+    .monthly-title { font-size: .9rem; font-weight: 700; color: #24292f; margin-bottom: 16px; }
+    .monthly-grid { display: flex; flex-wrap: wrap; gap: 16px; }
+    .month-card { flex: 1 1 140px; min-width: 130px; max-width: 180px; display: flex; flex-direction: column; align-items: center; border: 1px solid #eaecef; border-radius: 8px; padding: 12px 8px 10px; }
+    .month-card-title { font-size: .78rem; font-weight: 700; color: #24292f; margin-bottom: 8px; }
+    .month-card-donut { margin-bottom: 8px; }
+    .month-card-legend { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; margin-bottom: 4px; }
+    .leg-item { font-size: .68rem; font-weight: 600; padding: 2px 6px; border-radius: 8px; }
+    .leg-pass { background: #dafbe1; color: #1a7f37; }
+    .leg-warn { background: #fff8c5; color: #9a6700; }
+    .leg-fail { background: #ffebe9; color: #cf222e; }
+    .month-card-total { font-size: .68rem; color: #8c959f; }
     .arrow { font-size: .65rem; margin-right: 6px; display: inline-block; transition: transform .2s; }
     .group-count { font-size: .72rem; color: #8c959f; font-weight: 400; margin-left: 6px; }
     .hidden { display: none; }
@@ -72,8 +84,9 @@
       <table>
         <tbody>
 <tr class="month-header" data-gid="g202605" onclick="toggleGroup('g202605')"><td colspan="3"><span class="arrow" id="arrow-g202605">▼</span> 2026년 5월 <span class="group-count">180건</span></td></tr>
-<tr class="day-header" data-parent="g202605" data-gid="d20260528" onclick="toggleGroup('d20260528')"><td colspan="2" style="padding-left:32px"><span class="arrow" id="arrow-d20260528">▶</span> 05/28 <span class="group-count">4건</span></td><td><span class="status-badge status-pass">PASS</span></td></tr>
-<tr class="run-row hidden row-new" data-parent="d20260528"><td class="time-cell" style="padding-left:48px"><a href="2026-05-28_09-07/">05/28 09:07</a></td><td><span class="status-badge status-pass">PASS</span></td><td><span class="badge-new">최신</span></td></tr>
+<tr class="day-header" data-parent="g202605" data-gid="d20260528" onclick="toggleGroup('d20260528')"><td colspan="2" style="padding-left:32px"><span class="arrow" id="arrow-d20260528">▶</span> 05/28 <span class="group-count">5건</span></td><td><span class="status-badge status-pass">PASS</span></td></tr>
+<tr class="run-row hidden row-new" data-parent="d20260528"><td class="time-cell" style="padding-left:48px"><a href="2026-05-28_14-17/">05/28 14:17</a></td><td><span class="status-badge status-pass">PASS</span></td><td><span class="badge-new">최신</span></td></tr>
+<tr class="run-row hidden" data-parent="d20260528"><td class="time-cell" style="padding-left:48px"><a href="2026-05-28_09-07/">05/28 09:07</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
 <tr class="run-row hidden" data-parent="d20260528"><td class="time-cell" style="padding-left:48px"><a href="2026-05-28_07-49/">05/28 07:49</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
 <tr class="run-row hidden" data-parent="d20260528"><td class="time-cell" style="padding-left:48px"><a href="2026-05-28_05-32/">05/28 05:32</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
 <tr class="run-row hidden" data-parent="d20260528"><td class="time-cell" style="padding-left:48px"><a href="2026-05-28_03-02/">05/28 03:02</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
@@ -270,13 +283,38 @@
 <tr class="run-row hidden" data-parent="d20260507"><td class="time-cell" style="padding-left:48px"><a href="2026-05-07_10-31/">05/07 10:31</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
 <tr class="run-row hidden" data-parent="d20260507"><td class="time-cell" style="padding-left:48px"><a href="2026-05-07_06-13/">05/07 06:13</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
 <tr class="run-row hidden" data-parent="d20260507"><td class="time-cell" style="padding-left:48px"><a href="2026-05-07_02-29/">05/07 02:29</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
-<tr class="day-header" data-parent="g202605" data-gid="d20260506" onclick="toggleGroup('d20260506')"><td colspan="2" style="padding-left:32px"><span class="arrow" id="arrow-d20260506">▶</span> 05/06 <span class="group-count">4건</span></td><td><span class="status-badge status-pass">PASS</span></td></tr>
+<tr class="day-header" data-parent="g202605" data-gid="d20260506" onclick="toggleGroup('d20260506')"><td colspan="2" style="padding-left:32px"><span class="arrow" id="arrow-d20260506">▶</span> 05/06 <span class="group-count">3건</span></td><td><span class="status-badge status-pass">PASS</span></td></tr>
 <tr class="run-row hidden" data-parent="d20260506"><td class="time-cell" style="padding-left:48px"><a href="2026-05-06_20-54/">05/06 20:54</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
 <tr class="run-row hidden" data-parent="d20260506"><td class="time-cell" style="padding-left:48px"><a href="2026-05-06_17-09/">05/06 17:09</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
 <tr class="run-row hidden" data-parent="d20260506"><td class="time-cell" style="padding-left:48px"><a href="2026-05-06_14-52/">05/06 14:52</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
-<tr class="run-row hidden" data-parent="d20260506"><td class="time-cell" style="padding-left:48px"><a href="2026-05-06_13-26/">05/06 13:26</a></td><td><span class="status-badge status-pass">PASS</span></td><td></td></tr>
         </tbody>
       </table>
+    </div>
+
+    <div class="monthly-card">
+      <div class="monthly-title">월별 헬스체크 요약</div>
+      <div class="monthly-grid">
+      <div class="month-card">
+        <div class="month-card-title">2026년 5월</div>
+        <div class="month-card-donut"><svg viewBox="0 0 100 100" width="90" height="90"><circle cx="50" cy="50" r="40" fill="none" stroke="#2da44e" stroke-width="14" stroke-dasharray="247.80 251.33" stroke-dashoffset="-0.00" transform="rotate(-90, 50, 50)"/><circle cx="50" cy="50" r="40" fill="none" stroke="#d4a72c" stroke-width="14" stroke-dasharray="3.52 251.33" stroke-dashoffset="-247.80" transform="rotate(-90, 50, 50)"/><text x="50" y="55" text-anchor="middle" font-size="15" font-weight="700" fill="#24292f">99%</text></svg></div>
+        <div class="month-card-legend">
+          <span class="leg-item leg-pass">PASS 211</span>
+          <span class="leg-item leg-warn">WARN 3</span>
+          <span class="leg-item leg-fail">FAIL 0</span>
+        </div>
+        <div class="month-card-total">총 214회 실행</div>
+      </div>
+      <div class="month-card">
+        <div class="month-card-title">2026년 4월</div>
+        <div class="month-card-donut"><svg viewBox="0 0 100 100" width="90" height="90"><circle cx="50" cy="50" r="40" fill="none" stroke="#2da44e" stroke-width="14" stroke-dasharray="238.84 251.33" stroke-dashoffset="-0.00" transform="rotate(-90, 50, 50)"/><circle cx="50" cy="50" r="40" fill="none" stroke="#d4a72c" stroke-width="14" stroke-dasharray="12.49 251.33" stroke-dashoffset="-238.84" transform="rotate(-90, 50, 50)"/><text x="50" y="55" text-anchor="middle" font-size="15" font-weight="700" fill="#24292f">95%</text></svg></div>
+        <div class="month-card-legend">
+          <span class="leg-item leg-pass">PASS 153</span>
+          <span class="leg-item leg-warn">WARN 8</span>
+          <span class="leg-item leg-fail">FAIL 0</span>
+        </div>
+        <div class="month-card-total">총 161회 실행</div>
+      </div>
+      </div>
     </div>
 
     <div class="trend-card">
@@ -285,6 +323,13 @@
       <div class="trend-group">
         <div class="trend-lang">한국어 (/ko)</div>
         
+        <div class="bar-row">
+          <span class="bar-label">05/28 14:17</span>
+          <div class="bar-wrap">
+            <div class="bar" style="width:87%;background:#2da44e" title="05/28 14:17 · 966ms"></div>
+            <span class="bar-val">966ms</span>
+          </div>
+        </div>
         <div class="bar-row">
           <span class="bar-label">05/28 09:07</span>
           <div class="bar-wrap">
@@ -362,17 +407,17 @@
             <span class="bar-val">793ms</span>
           </div>
         </div>
-        <div class="bar-row">
-          <span class="bar-label">05/27 00:55</span>
-          <div class="bar-wrap">
-            <div class="bar" style="width:81%;background:#2da44e" title="05/27 00:55 · 905ms"></div>
-            <span class="bar-val">905ms</span>
-          </div>
-        </div>
       </div>
       <div class="trend-group">
         <div class="trend-lang">영어 (/en)</div>
         
+        <div class="bar-row">
+          <span class="bar-label">05/28 14:17</span>
+          <div class="bar-wrap">
+            <div class="bar" style="width:24%;background:#2da44e" title="05/28 14:17 · 220ms"></div>
+            <span class="bar-val">220ms</span>
+          </div>
+        </div>
         <div class="bar-row">
           <span class="bar-label">05/28 09:07</span>
           <div class="bar-wrap">
@@ -450,17 +495,17 @@
             <span class="bar-val">179ms</span>
           </div>
         </div>
-        <div class="bar-row">
-          <span class="bar-label">05/27 00:55</span>
-          <div class="bar-wrap">
-            <div class="bar" style="width:74%;background:#2da44e" title="05/27 00:55 · 680ms"></div>
-            <span class="bar-val">680ms</span>
-          </div>
-        </div>
       </div>
       <div class="trend-group">
         <div class="trend-lang">일본어 (/jp)</div>
         
+        <div class="bar-row">
+          <span class="bar-label">05/28 14:17</span>
+          <div class="bar-wrap">
+            <div class="bar" style="width:69%;background:#2da44e" title="05/28 14:17 · 736ms"></div>
+            <span class="bar-val">736ms</span>
+          </div>
+        </div>
         <div class="bar-row">
           <span class="bar-label">05/28 09:07</span>
           <div class="bar-wrap">
@@ -538,17 +583,17 @@
             <span class="bar-val">588ms</span>
           </div>
         </div>
-        <div class="bar-row">
-          <span class="bar-label">05/27 00:55</span>
-          <div class="bar-wrap">
-            <div class="bar" style="width:20%;background:#2da44e" title="05/27 00:55 · 217ms"></div>
-            <span class="bar-val">217ms</span>
-          </div>
-        </div>
       </div>
       <div class="trend-group">
         <div class="trend-lang">중국어 (/tw)</div>
         
+        <div class="bar-row">
+          <span class="bar-label">05/28 14:17</span>
+          <div class="bar-wrap">
+            <div class="bar" style="width:75%;background:#2da44e" title="05/28 14:17 · 779ms"></div>
+            <span class="bar-val">779ms</span>
+          </div>
+        </div>
         <div class="bar-row">
           <span class="bar-label">05/28 09:07</span>
           <div class="bar-wrap">
@@ -626,16 +671,9 @@
             <span class="bar-val">590ms</span>
           </div>
         </div>
-        <div class="bar-row">
-          <span class="bar-label">05/27 00:55</span>
-          <div class="bar-wrap">
-            <div class="bar" style="width:67%;background:#2da44e" title="05/27 00:55 · 704ms"></div>
-            <span class="bar-val">704ms</span>
-          </div>
-        </div>
       </div>
     </div>
-    <p class="footer">최근 실행: 2026-05-28 09:07 (KST)</p>
+    <p class="footer">최근 실행: 2026-05-28 14:17 (KST)</p>
   </div>
 <script>
 function toggleGroup(id) {
