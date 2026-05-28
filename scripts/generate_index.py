@@ -1,13 +1,15 @@
 import sys
 import re
 import json
+import math
 from collections import defaultdict
 
 runs_file     = sys.argv[1]
 current_run   = sys.argv[2]
 statuses_file = sys.argv[3]
 perf_file     = sys.argv[4]
-output_file   = sys.argv[5]
+monthly_file  = sys.argv[5]
+output_file   = sys.argv[6]
 
 with open(runs_file) as f:
     entries = sorted(
@@ -26,6 +28,12 @@ try:
         perf_history = json.load(f)
 except Exception:
     perf_history = {}
+
+try:
+    with open(monthly_file) as f:
+        monthly_stats = json.load(f)
+except Exception:
+    monthly_stats = {}
 
 STATUS_MAP = {
     'PASS':    ('PASS', 'status-pass'),
@@ -160,6 +168,67 @@ if trend_rows:
       {trend_rows}
     </div>'''
 
+# ── 월별 요약 도넛 차트 ─────────────────────────────────────────────
+def make_donut_svg(pass_c, warn_c, fail_c):
+    total = pass_c + warn_c + fail_c
+    r = 40
+    circ = 2 * math.pi * r
+
+    if total == 0:
+        empty = f'<circle cx="50" cy="50" r="{r}" fill="none" stroke="#d0d7de" stroke-width="14"/>'
+        return f'<svg viewBox="0 0 100 100" width="90" height="90">{empty}</svg>'
+
+    segments = []
+    cumulative = 0.0
+    for length_raw, color in [
+        (pass_c, '#2da44e'),
+        (warn_c, '#d4a72c'),
+        (fail_c, '#cf222e'),
+    ]:
+        seg = circ * length_raw / total
+        if seg > 0:
+            segments.append(
+                f'<circle cx="50" cy="50" r="{r}" fill="none" stroke="{color}" stroke-width="14" '
+                f'stroke-dasharray="{seg:.2f} {circ:.2f}" stroke-dashoffset="{-cumulative:.2f}" '
+                f'transform="rotate(-90, 50, 50)"/>'
+            )
+        cumulative += seg
+
+    avail = round(pass_c / total * 100)
+    center = f'<text x="50" y="55" text-anchor="middle" font-size="15" font-weight="700" fill="#24292f">{avail}%</text>'
+    return f'<svg viewBox="0 0 100 100" width="90" height="90">{"".join(segments)}{center}</svg>'
+
+monthly_section = ""
+if monthly_stats:
+    sorted_months = sorted(monthly_stats.keys(), reverse=True)
+    month_cards = ""
+    for m in sorted_months:
+        d = monthly_stats[m]
+        p, w, f_ = d.get('PASS', 0), d.get('WARN', 0), d.get('FAIL', 0)
+        total_m = p + w + f_
+        year, mon = m.split('-')
+        label = f"{year}년 {int(mon)}월"
+        donut = make_donut_svg(p, w, f_)
+        avail_pct = f"{round(p/total_m*100)}%" if total_m else "-"
+        month_cards += f'''
+      <div class="month-card">
+        <div class="month-card-title">{label}</div>
+        <div class="month-card-donut">{donut}</div>
+        <div class="month-card-legend">
+          <span class="leg-item leg-pass">PASS {p}</span>
+          <span class="leg-item leg-warn">WARN {w}</span>
+          <span class="leg-item leg-fail">FAIL {f_}</span>
+        </div>
+        <div class="month-card-total">총 {total_m}회 실행</div>
+      </div>'''
+
+    monthly_section = f'''
+    <div class="monthly-card">
+      <div class="monthly-title">월별 헬스체크 요약</div>
+      <div class="monthly-grid">{month_cards}
+      </div>
+    </div>'''
+
 css = """
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f6f8fa; min-height: 100vh; }
@@ -208,6 +277,18 @@ css = """
     .bar { height: 12px; border-radius: 3px; min-width: 2px; transition: width .3s; }
     .bar-val { font-size: .72rem; color: #57606a; white-space: nowrap; }
     .footer { text-align: center; color: #8c959f; font-size: .8rem; margin-top: 16px; }
+    .monthly-card { background: white; border: 1px solid #d0d7de; border-radius: 8px; padding: 16px 20px; margin-bottom: 20px; }
+    .monthly-title { font-size: .9rem; font-weight: 700; color: #24292f; margin-bottom: 16px; }
+    .monthly-grid { display: flex; flex-wrap: wrap; gap: 16px; }
+    .month-card { flex: 1 1 140px; min-width: 130px; max-width: 180px; display: flex; flex-direction: column; align-items: center; border: 1px solid #eaecef; border-radius: 8px; padding: 12px 8px 10px; }
+    .month-card-title { font-size: .78rem; font-weight: 700; color: #24292f; margin-bottom: 8px; }
+    .month-card-donut { margin-bottom: 8px; }
+    .month-card-legend { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; margin-bottom: 4px; }
+    .leg-item { font-size: .68rem; font-weight: 600; padding: 2px 6px; border-radius: 8px; }
+    .leg-pass { background: #dafbe1; color: #1a7f37; }
+    .leg-warn { background: #fff8c5; color: #9a6700; }
+    .leg-fail { background: #ffebe9; color: #cf222e; }
+    .month-card-total { font-size: .68rem; color: #8c959f; }
     .arrow { font-size: .65rem; margin-right: 6px; display: inline-block; transition: transform .2s; }
     .group-count { font-size: .72rem; color: #8c959f; font-weight: 400; margin-left: 6px; }
     .hidden { display: none; }
@@ -238,6 +319,7 @@ html = f"""<!DOCTYPE html>
 {rows}        </tbody>
       </table>
     </div>
+{monthly_section}
 {trend_section}
     <p class="footer">최근 실행: {cur_display} (KST)</p>
   </div>
