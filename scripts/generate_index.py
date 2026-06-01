@@ -404,7 +404,7 @@ for midx, month in enumerate(sorted_months_list):
                 type_icons = {
                     '서버': '🖥️', 'API': '🔌', '다운로드': '📥',
                     '파일': '📄', '콘텐츠': '📝', '이미지': '🖼️',
-                    '로그인': '🔑', 'UI': '🖱️',
+                    '로그인': '🔑', 'UI': '🖱️', '이지다운': '📱',
                 }
                 f_rows = ''
                 for fr in run_failures:

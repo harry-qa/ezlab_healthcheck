@@ -555,6 +555,97 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   });
 
   // ══════════════════════════════════════════════════════════════════
+  // STEP 8: 이지다운(ezdown.kr) 정보 페이지 점검 — 별도 도메인
+  //   다운로드 기능 페이지가 아니라 '앱 소개 + 사용 후기 + FAQ' 정보성 페이지.
+  //   SPA(Next.js)라 단순 HTTP 200으론 부족 → 렌더 후 타이틀/본문/콘텐츠 검증.
+  //   언어 체계는 이지랩과 동일(ko/en/jp/tw). CHN 토글은 /tw/ 로 매핑됨.
+  // ══════════════════════════════════════════════════════════════════
+  const ezdownBase = 'https://ezdown.kr';
+  const ezdownKeywords: Record<string, string[]> = {
+    ko: ['자주 묻는 질문', '유튜브'],
+    en: ['Frequently Asked Questions', 'YouTube'],
+    jp: ['よくある質問', 'YouTube'],
+    tw: ['使用評價', 'YouTube'],
+  };
+
+  await test.step('STEP 8 · 이지다운(ezdown.kr) 정보 페이지 점검', async () => {
+    const ezdownSeenImg = new Set<string>(); // 언어 간 공통 이미지 중복 fetch 방지
+    for (const lang of languages) {
+      await test.step(`[이지다운][${lang}] 렌더 / 콘텐츠 / 이미지`, async () => {
+        const url = `${ezdownBase}/${lang}/`;
+        try {
+          const res = await page.goto(url, { waitUntil: 'networkidle', timeout: 20000 });
+          const status = res?.status() ?? 0;
+          visitedUrls.add(url);
+
+          // 1) 렌더 생존 — SPA라 모든 경로가 200을 주므로 타이틀+본문으로 실제 렌더 확인
+          const title    = (await page.title()) || '';
+          const bodyText = await page.locator('body').innerText();
+          const rendered = /ezdown|이지다운/i.test(title) && bodyText.trim().length > 300;
+
+          if (status !== 200 || !rendered) {
+            failCount++;
+            const ts = kstNow();
+            const symptom = status !== 200
+              ? `HTTP ${status} 응답`
+              : `렌더 실패 (title="${title}", 본문 ${bodyText.trim().length}자)`;
+            console.log(`[FAIL][이지다운][${lang}] ${symptom} ${url} @ ${ts}`);
+            failRecords.push({ step: 'STEP8·이지다운', type: '이지다운', lang, url, status, responseTime: 0, symptom, timestamp: ts });
+            expect.soft(rendered, `[이지다운][${lang}] 렌더 실패 → ${url}`).toBe(true);
+            return;
+          }
+
+          // 2) 핵심 콘텐츠(후기 / FAQ 섹션) 키워드 존재 확인
+          const kws     = ezdownKeywords[lang] ?? [];
+          const lower   = bodyText.toLowerCase();
+          const missing = kws.filter(k => !lower.includes(k.toLowerCase()));
+          if (missing.length > 0) {
+            failCount++;
+            const ts = kstNow();
+            const ssC = await page.screenshot({ fullPage: false });
+            await test.info().attach(`스크린샷_이지다운_콘텐츠_${lang}`, { body: ssC, contentType: 'image/png' });
+            console.log(`[FAIL][이지다운][${lang}] 누락 키워드: ${missing.join(', ')} @ ${ts}`);
+            failRecords.push({ step: 'STEP8·이지다운', type: '이지다운', lang, url, status: 200, responseTime: 0, symptom: `누락 키워드: ${missing.join(', ')}`, timestamp: ts });
+            expect.soft(missing.length, `[이지다운][${lang}] 콘텐츠 누락: ${missing.join(', ')}`).toBe(0);
+          } else {
+            passCount++;
+            console.log(`[PASS][이지다운][${lang}] 렌더 + 콘텐츠 정상`);
+          }
+
+          // 3) 깨진 이미지 — DOM(lazy-load) 대신 URL fetch 상태로 판별
+          const imgs = await page.locator('img').all();
+          for (const img of imgs) {
+            const src = await img.getAttribute('src');
+            if (!src || src.startsWith('data:') || src.startsWith('blob:') || src.includes('/_next/image')) continue;
+            const imgUrl   = src.startsWith('http') ? src : ezdownBase + (src.startsWith('/') ? src : '/' + src);
+            const cleanSrc = imgUrl.split('?')[0];
+            if (ezdownSeenImg.has(cleanSrc)) continue;
+            ezdownSeenImg.add(cleanSrc);
+            try {
+              const ir = await page.request.get(cleanSrc, { headers, timeout: 8000 });
+              if (ir.status() !== 200) {
+                warnCount++;
+                const ts = kstNow();
+                console.log(`[WARN][이지다운][이미지][${lang}] ${ir.status()} ${cleanSrc}`);
+                failRecords.push({ step: 'STEP8·이지다운이미지', type: '이미지', lang, url: cleanSrc, status: ir.status(), responseTime: 0, symptom: `이미지 로드 실패 (${ir.status()})`, timestamp: ts });
+              }
+            } catch {
+              warnCount++;
+              console.log(`[WARN][이지다운][이미지][${lang}] 접근 불가: ${cleanSrc}`);
+            }
+          }
+        } catch {
+          failCount++;
+          const ts = kstNow();
+          console.log(`[ERROR][이지다운][${lang}] 접속/렌더 불가: ${url} @ ${ts}`);
+          failRecords.push({ step: 'STEP8·이지다운', type: '이지다운', lang, url, status: 0, responseTime: 0, symptom: '접속 불가 / 타임아웃', timestamp: ts });
+          expect.soft(null, `[이지다운][${lang}] 접속 불가 → ${url}`).not.toBeNull();
+        }
+      });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
   // 최종 요약 + 배지용 JSON 저장
   // ══════════════════════════════════════════════════════════════════
   const totalCount = passCount + failCount + warnCount;
@@ -588,6 +679,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
     `  STEP 5 · 언어별 핵심 콘텐츠 무결성 확인`,
     `  STEP 6 · 깨진 이미지 감지`,
     `  STEP 7 · 언어별 로그인 버튼 렌더링 확인`,
+    `  STEP 8 · 이지다운(ezdown.kr) 정보 페이지 점검`,
   ];
 
   if (failRecords.length > 0) {
@@ -631,7 +723,8 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
         r.type === '파일'    ? '파일 서버 / CDN 확인' :
         r.type === '콘텐츠'  ? '프론트엔드 배포 확인' :
         r.type === '이미지'  ? '이미지 서버 / CDN 확인' :
-        r.type === '로그인'  ? '로그인 페이지 렌더링 확인' : '담당팀 확인 요청'
+        r.type === '로그인'  ? '로그인 페이지 렌더링 확인' :
+        r.type === '이지다운' ? '이지다운 사이트(ezdown.kr) 확인' : '담당팀 확인 요청'
       }`,
     ].join('\n')).join('\n\n');
 
