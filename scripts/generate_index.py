@@ -93,6 +93,50 @@ overview_html = f'''
 # ── Response time line chart ──────────────────────────────────────────
 LANG_COLORS = {'ko': '#58a6ff', 'en': '#3fb950', 'jp': '#f78166', 'tw': '#d2a8ff'}
 
+def smooth_path(pts, lo=None, hi=None):
+    """Monotone cubic Hermite (Fritsch–Carlson): smooth but never overshoots,
+    so no false peaks/valleys are introduced between real data points."""
+    n = len(pts)
+    if n < 2:
+        return ''
+    if n == 2:
+        return f'M{pts[0][0]:.1f},{pts[0][1]:.1f} L{pts[1][0]:.1f},{pts[1][1]:.1f}'
+
+    xs = [p[0] for p in pts]
+    ys = [p[1] for p in pts]
+    dx = [xs[i + 1] - xs[i] for i in range(n - 1)]
+    delta = [(ys[i + 1] - ys[i]) / dx[i] if dx[i] else 0 for i in range(n - 1)]
+
+    m = [0.0] * n
+    m[0] = delta[0]
+    m[-1] = delta[-1]
+    for i in range(1, n - 1):
+        if delta[i - 1] * delta[i] <= 0:
+            m[i] = 0.0
+        else:
+            m[i] = (delta[i - 1] + delta[i]) / 2
+
+    for i in range(n - 1):
+        if delta[i] == 0:
+            m[i] = m[i + 1] = 0.0
+        else:
+            a = m[i] / delta[i]
+            b = m[i + 1] / delta[i]
+            s = a * a + b * b
+            if s > 9:
+                t = 3.0 / math.sqrt(s)
+                m[i] = t * a * delta[i]
+                m[i + 1] = t * b * delta[i]
+
+    d = f'M{xs[0]:.1f},{ys[0]:.1f}'
+    for i in range(n - 1):
+        c1x = xs[i] + dx[i] / 3
+        c1y = ys[i] + m[i] * dx[i] / 3
+        c2x = xs[i + 1] - dx[i] / 3
+        c2y = ys[i + 1] - m[i + 1] * dx[i] / 3
+        d += f' C{c1x:.1f},{c1y:.1f} {c2x:.1f},{c2y:.1f} {xs[i+1]:.1f},{ys[i+1]:.1f}'
+    return d
+
 def make_line_chart():
     recent = list(reversed(entries[:24]))
     if not recent:
@@ -108,10 +152,12 @@ def make_line_chart():
         return '', []
 
     all_vals = [v for vs in data.values() for v in vs if v > 0]
-    max_val  = max(max(all_vals) * 1.15, THRESHOLD * 1.5)
+    # Round the axis ceiling up to a tidy 200ms step for clean grid labels
+    raw_max  = max(max(all_vals) * 1.12, THRESHOLD * 1.4)
+    max_val  = math.ceil(raw_max / 200) * 200
 
-    W, H = 660, 200
-    PL, PR, PT, PB = 52, 32, 16, 36
+    W, H = 680, 230
+    PL, PR, PT, PB = 44, 14, 18, 30
     CW, CH = W - PL - PR, H - PT - PB
     n = len(recent)
 
@@ -119,38 +165,50 @@ def make_line_chart():
     def cy(ms): return PT + CH * (1 - ms / max_val)
 
     svg = []
-    svg.append(f'<rect x="{PL}" y="{PT}" width="{CW}" height="{CH}" fill="#080b10" rx="3"/>')
+    # Soft glow so the thin lines read as crisp neon on the dark plot
+    svg.append(
+        '<defs><filter id="lglow" x="-10%" y="-20%" width="120%" height="140%">'
+        '<feGaussianBlur stdDeviation="2" result="b"/>'
+        '<feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>'
+    )
+    svg.append(f'<rect x="{PL}" y="{PT}" width="{CW}" height="{CH}" fill="#0a0d13" rx="6"/>')
 
-    # Horizontal grid lines
-    for i in range(5):
-        gy = PT + i * CH / 4
-        ms_val = max_val * (4 - i) / 4
-        svg.append(f'<line x1="{PL}" y1="{gy:.1f}" x2="{PL+CW}" y2="{gy:.1f}" stroke="#1c2333" stroke-width="1"/>')
-        svg.append(f'<text x="{PL-6}" y="{gy+4:.1f}" text-anchor="end" font-size="9" fill="#3d4451">{int(ms_val)}</text>')
+    # Horizontal grid lines (rounded labels)
+    rows = 4
+    for i in range(rows + 1):
+        gy = PT + i * CH / rows
+        ms_val = max_val * (rows - i) / rows
+        svg.append(f'<line x1="{PL}" y1="{gy:.1f}" x2="{PL+CW}" y2="{gy:.1f}" stroke="#161c28" stroke-width="1"/>')
+        svg.append(f'<text x="{PL-8}" y="{gy+3.5:.1f}" text-anchor="end" font-size="9" fill="#3d4451">{int(ms_val)}</text>')
 
-    # Threshold danger line
+    # Threshold danger band + line
     ty = cy(THRESHOLD)
     if PT <= ty <= PT + CH:
-        svg.append(f'<line x1="{PL}" y1="{ty:.1f}" x2="{PL+CW}" y2="{ty:.1f}" stroke="#f85149" stroke-width="1.5" stroke-dasharray="5,3" opacity="0.6"/>')
-        svg.append(f'<text x="{PL+CW+4}" y="{ty+4:.1f}" font-size="8" fill="#f85149" font-weight="600">{THRESHOLD}ms</text>')
+        svg.append(f'<rect x="{PL}" y="{PT}" width="{CW}" height="{ty-PT:.1f}" fill="#f85149" opacity="0.05" rx="6"/>')
+        svg.append(f'<line x1="{PL}" y1="{ty:.1f}" x2="{PL+CW}" y2="{ty:.1f}" stroke="#f85149" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.5"/>')
 
-    # Lines + dots
+    # Smooth lines + focal "current" dot
     for lang in LANGS:
         if lang not in data:
             continue
         color = LANG_COLORS[lang]
-        pts = [(cx(i), cy(v), v, recent[i]) for i, v in enumerate(data[lang]) if v > 0]
-
-        if len(pts) >= 2:
-            path_d = f'M{pts[0][0]:.1f},{pts[0][1]:.1f}' + ''.join(f'L{x:.1f},{y:.1f}' for x, y, _, _ in pts[1:])
-            svg.append(f'<path d="{path_d}" fill="none" stroke="{color}" stroke-width="2" stroke-linejoin="round" opacity="0.9"/>')
-
-        for x, y, ms, run in pts:
+        raw = [(cx(i), cy(v), v, recent[i]) for i, v in enumerate(data[lang]) if v > 0]
+        if not raw:
+            continue
+        pts = [(x, y) for x, y, _, _ in raw]
+        path_d = smooth_path(pts, PT, PT + CH)
+        if path_d:
+            svg.append(f'<path d="{path_d}" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.95" filter="url(#lglow)"/>')
+        # Invisible hover targets keep tooltips without visual clutter
+        for x, y, ms, run in raw:
             ds, ts = run.split('_')
             dp = ds.split('-')
             tip = f"{dp[1]}/{dp[2]} {ts.replace('-',':')} · {LANG_LABELS[lang]} {ms}ms"
-            dot_c = '#f85149' if ms >= THRESHOLD else color
-            svg.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.5" fill="{dot_c}" stroke="#161b22" stroke-width="1.5"><title>{tip}</title></circle>')
+            svg.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="6" fill="transparent"><title>{tip}</title></circle>')
+        # Latest value = solid focal dot with ring
+        lx, ly, lms, _ = raw[-1]
+        ring = '#f85149' if lms >= THRESHOLD else color
+        svg.append(f'<circle cx="{lx:.1f}" cy="{ly:.1f}" r="4" fill="{ring}" stroke="#161b22" stroke-width="2"/>')
 
     # X-axis labels
     step = max(1, n // 6)
@@ -159,8 +217,8 @@ def make_line_chart():
             ds, ts = run.split('_')
             dp = ds.split('-')
             lx = cx(i)
-            svg.append(f'<text x="{lx:.1f}" y="{H-PB+13}" text-anchor="middle" font-size="8" fill="#3d4451">{dp[1]}/{dp[2]}</text>')
-            svg.append(f'<text x="{lx:.1f}" y="{H-PB+22}" text-anchor="middle" font-size="7" fill="#2d3340">{ts.replace("-",":")}</text>')
+            svg.append(f'<text x="{lx:.1f}" y="{H-PB+14}" text-anchor="middle" font-size="8" fill="#3d4451">{dp[1]}/{dp[2]}</text>')
+            svg.append(f'<text x="{lx:.1f}" y="{H-PB+23}" text-anchor="middle" font-size="7" fill="#2d3340">{ts.replace("-",":")}</text>')
 
     chart_svg = f'<svg viewBox="0 0 {W} {H}" width="100%" style="display:block">{"".join(svg)}</svg>'
 
@@ -179,19 +237,21 @@ line_chart_svg, perf_stats = make_line_chart()
 
 perf_stats_html = ''
 if perf_stats:
-    pills = ''
+    cards = ''
     for lang, color, avg_ms, max_ms in perf_stats:
-        avg_cls = 'pill-danger' if avg_ms >= THRESHOLD else ''
-        max_cls = 'pill-danger' if max_ms >= THRESHOLD else 'pill-muted'
-        pills += (
-            f'<div class="perf-pill">'
+        avg_cls = 'stat-danger' if avg_ms >= THRESHOLD else ''
+        max_cls = 'stat-max-danger' if max_ms >= THRESHOLD else ''
+        cards += (
+            f'<div class="perf-stat">'
+            f'<div class="perf-stat-head">'
             f'<span class="lang-dot" style="background:{color}"></span>'
-            f'<span class="pill-lang">{LANG_LABELS[lang]}</span>'
-            f'<span class="pill-avg {avg_cls}">avg {avg_ms}ms</span>'
-            f'<span class="pill-max {max_cls}">max {max_ms}ms</span>'
+            f'<span class="perf-stat-lang">{LANG_LABELS[lang]}</span>'
+            f'</div>'
+            f'<div class="perf-stat-avg {avg_cls}">{avg_ms}<span class="unit">ms</span></div>'
+            f'<div class="perf-stat-max {max_cls}">최대 {max_ms}ms</div>'
             f'</div>'
         )
-    perf_stats_html = f'<div class="perf-stat-row">{pills}</div>'
+    perf_stats_html = f'<div class="perf-stat-row">{cards}</div>'
 
 # ── 90-day heatmap bar chart ──────────────────────────────────────────
 def make_heatmap():
@@ -319,8 +379,14 @@ for midx, month in enumerate(sorted_months_list):
             for lang in LANGS:
                 ms = perf.get(lang, 0)
                 if ms > 0:
-                    slow_cls = ' perf-slow' if ms >= THRESHOLD else ''
-                    perf_cells += f'<span class="perf-cell{slow_cls}">{lang}:{ms}ms</span>'
+                    slow_cls = ' slow' if ms >= THRESHOLD else ''
+                    perf_cells += (
+                        f'<span class="perf-chip{slow_cls}">'
+                        f'<span class="pc-dot" style="background:{LANG_COLORS[lang]}"></span>'
+                        f'<span class="pc-lang">{lang.upper()}</span>'
+                        f'<span class="pc-ms">{ms}</span>'
+                        f'</span>'
+                    )
 
             eid = entry.replace('_', '-')
 
@@ -494,16 +560,18 @@ css = """
   .threshold-note { font-size: .72rem; color: #484f58; margin-left: auto; }
   .threshold-note span { color: #f85149; font-weight: 600; }
 
-  /* Perf stat pills */
-  .perf-stat-row { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
-  .perf-pill { display: flex; align-items: center; gap: 6px; background: #0d1117;
-               border: 1px solid #21262d; border-radius: 6px; padding: 4px 10px; }
+  /* Perf stat cards (chart legend) */
+  .perf-stat-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 16px; }
+  .perf-stat { background: #0d1117; border: 1px solid #21262d; border-radius: 8px; padding: 10px 12px; }
+  .perf-stat-head { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; }
   .lang-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-  .pill-lang { font-size: .75rem; color: #8b949e; }
-  .pill-avg  { font-size: .75rem; color: #c9d1d9; font-weight: 600; }
-  .pill-max  { font-size: .72rem; }
-  .pill-muted  { color: #484f58; }
-  .pill-danger { color: #f85149; font-weight: 700; }
+  .perf-stat-lang { font-size: .72rem; color: #8b949e; font-weight: 600; }
+  .perf-stat-avg { font-size: 1.3rem; font-weight: 800; color: #e6edf3; line-height: 1;
+                   font-variant-numeric: tabular-nums; }
+  .perf-stat-avg .unit { font-size: .7rem; font-weight: 600; color: #6e7681; margin-left: 2px; }
+  .perf-stat-avg.stat-danger { color: #f85149; }
+  .perf-stat-max { font-size: .68rem; color: #6e7681; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .perf-stat-max.stat-max-danger { color: #d29922; font-weight: 600; }
 
   /* Heatmap */
   .heatmap-legend { display: flex; gap: 14px; margin-bottom: 10px; flex-wrap: wrap; }
@@ -564,10 +632,17 @@ css = """
   .chev { color: #484f58; font-size: 1.2rem; display: inline-block; transition: transform .2s; }
   .chev.open { transform: rotate(90deg); }
 
-  /* Perf summary cells */
-  .perf-summary { font-size: .72rem; color: #484f58; }
-  .perf-cell { display: inline-block; margin-right: 6px; white-space: nowrap; }
-  .perf-slow { color: #f85149; font-weight: 600; }
+  /* Perf summary chips */
+  .perf-summary { white-space: nowrap; text-align: right; }
+  .perf-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px 2px 6px;
+               margin-left: 4px; border-radius: 6px; background: #0d1117;
+               border: 1px solid #21262d; vertical-align: middle; }
+  .pc-dot  { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
+  .pc-lang { font-size: .6rem; font-weight: 700; color: #6e7681; letter-spacing: .03em; }
+  .pc-ms   { font-size: .72rem; font-weight: 600; color: #8b949e; font-variant-numeric: tabular-nums; }
+  .perf-chip.slow { background: #2a1414; border-color: #4d2424; }
+  .perf-chip.slow .pc-ms { color: #ff7b72; font-weight: 700; }
+  .perf-chip.slow .pc-lang { color: #b9686a; }
 
   /* Detail panel */
   .run-detail td { padding: 0; border-top: none; }
@@ -707,8 +782,8 @@ html = f"""<!DOCTYPE html>
     </div>
     <table>
       <colgroup>
-        <col style="width:auto"><col style="width:80px">
-        <col style="width:220px"><col style="width:28px">
+        <col style="width:auto"><col style="width:72px">
+        <col style="width:250px"><col style="width:28px">
       </colgroup>
       <tbody id="report-body">
 {rows_html}      </tbody>

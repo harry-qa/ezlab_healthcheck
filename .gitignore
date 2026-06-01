@@ -12,3 +12,7 @@ node_modules/
 
 # Claude local config
 .claude/
+
+# Local QA artifacts
+report-status.json
+__pycache__/
