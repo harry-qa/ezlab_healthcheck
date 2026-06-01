@@ -63,6 +63,10 @@ jobs:
           CURRENT_STATUS=$(python3 -c "import json; d=json.load(open('report-status.json')); print(d.get('status','UNKNOWN'))" 2>/dev/null || echo "UNKNOWN")
           echo "HEALTH_STATUS=$CURRENT_STATUS" >> $GITHUB_ENV
 
+          # 직전 런 상태 (update_statuses 전 /tmp/statuses.json 최신 키) → Slack 전환 알림용
+          PREV_STATUS=$(python3 -c "import json; d=json.load(open('/tmp/statuses.json')); ks=sorted(d,reverse=True); print(d[ks[0]] if ks else 'NONE')" 2>/dev/null || echo "NONE")
+          echo "PREV_STATUS=$PREV_STATUS" >> $GITHUB_ENV
+
           python3 scripts/update_statuses.py "$DATETIME" "$CURRENT_STATUS"
           python3 scripts/update_perf.py "$DATETIME"
           python3 scripts/update_failures.py "$DATETIME"
@@ -88,6 +92,15 @@ jobs:
       - name: 오래된 리포트 폴더 정리 (120일 경과 · 용량 방어)
         continue-on-error: true
         run: python3 scripts/prune_old_reports.py
+
+      - name: Slack 알림 (장애 발생 / 복구 전환 시)
+        if: env.HEALTH_STATUS == 'FAIL' || env.PREV_STATUS == 'FAIL'
+        continue-on-error: true
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+        run: python3 scripts/notify_slack.py
 
       - name: 실패 알림 (GitHub Issue 자동 생성)
         if: env.HEALTH_STATUS == 'FAIL'
