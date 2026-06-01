@@ -85,6 +85,10 @@ jobs:
           folder: reports
           clean: false
 
+      - name: 오래된 리포트 폴더 정리 (120일 경과 · 용량 방어)
+        continue-on-error: true
+        run: python3 scripts/prune_old_reports.py
+
       - name: 실패 알림 (GitHub Issue 자동 생성)
         if: env.HEALTH_STATUS == 'FAIL'
         env:
