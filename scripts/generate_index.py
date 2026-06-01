@@ -49,7 +49,17 @@ warn_c = sum(1 for e in entries if statuses.get(e) == 'WARN')
 
 health_score = round(pass_c / total * 100, 1) if total else 0
 cur_status   = statuses.get(current_run, 'UNKNOWN')
-fail_24h     = sum(1 for e in entries[:24] if statuses.get(e) == 'FAIL')
+
+# 진짜 24시간 윈도우 — 실행이 시간당이 아니라(GitHub 스케줄러가 상당수 드랍)
+# entries[:24]="최근 24회"는 약 3.4일이라 "24시간" 라벨과 안 맞음. 타임스탬프로 계산.
+def _parse_run(e):
+    return datetime.strptime(e, '%Y-%m-%d_%H-%M')
+try:
+    _window_start = _parse_run(current_run) - timedelta(hours=24)
+    fail_24h = sum(1 for e in entries
+                   if statuses.get(e) == 'FAIL' and _parse_run(e) >= _window_start)
+except ValueError:
+    fail_24h = sum(1 for e in entries[:24] if statuses.get(e) == 'FAIL')
 
 cur_date_str, cur_time_str = current_run.split('_')
 cur_display = f"{cur_date_str} {cur_time_str.replace('-', ':')}"

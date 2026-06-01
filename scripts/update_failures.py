@@ -18,7 +18,7 @@ except Exception:
 if failures:
     history[datetime_key] = failures
 
-keys = sorted(history.keys(), reverse=True)[:180]
+keys = sorted(history.keys(), reverse=True)[:500]
 history = {k: history[k] for k in keys}
 
 with open('/tmp/failures-history.json', 'w') as f:
