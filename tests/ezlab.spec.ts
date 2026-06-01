@@ -570,6 +570,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
 
   await test.step('STEP 8 · 이지다운(ezdown.kr) 정보 페이지 점검', async () => {
     const ezdownSeenImg = new Set<string>(); // 언어 간 공통 이미지 중복 fetch 방지
+    console.log(`[INFO] STEP 8 이지다운 점검 대상: ${languages.map(l => `${ezdownBase}/${l}/`).join(', ')}`);
     for (const lang of languages) {
       await test.step(`[이지다운][${lang}] 렌더 / 콘텐츠 / 이미지`, async () => {
         const url = `${ezdownBase}/${lang}/`;
@@ -609,7 +610,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
             expect.soft(missing.length, `[이지다운][${lang}] 콘텐츠 누락: ${missing.join(', ')}`).toBe(0);
           } else {
             passCount++;
-            console.log(`[PASS][이지다운][${lang}] 렌더 + 콘텐츠 정상`);
+            console.log(`[PASS][이지다운][${lang}] 렌더 + 콘텐츠 정상 → ${url}`);
           }
 
           // 3) 깨진 이미지 — DOM(lazy-load) 대신 URL fetch 상태로 판별
