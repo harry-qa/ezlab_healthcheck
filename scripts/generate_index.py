@@ -137,121 +137,82 @@ def smooth_path(pts, lo=None, hi=None):
         d += f' C{c1x:.1f},{c1y:.1f} {c2x:.1f},{c2y:.1f} {xs[i+1]:.1f},{ys[i+1]:.1f}'
     return d
 
-def make_line_chart():
+def make_lang_sparklines():
+    """Small-multiples: one sparkline card per language (no overlap)."""
     recent = list(reversed(entries[:24]))
     if not recent:
-        return '', []
-
-    data = {}
+        return ''
+    series = {}
     for lang in LANGS:
         vals = [perf_history.get(r, {}).get('serverTimes', {}).get(lang, 0) for r in recent]
         if any(v > 0 for v in vals):
-            data[lang] = vals
+            series[lang] = vals
+    if not series:
+        return ''
 
-    if not data:
-        return '', []
-
-    all_vals = [v for vs in data.values() for v in vs if v > 0]
-    # Round the axis ceiling up to a tidy 200ms step for clean grid labels
-    raw_max  = max(max(all_vals) * 1.12, THRESHOLD * 1.4)
+    all_vals = [v for vs in series.values() for v in vs if v > 0]
+    raw_max  = max(max(all_vals) * 1.12, THRESHOLD * 1.3)
     max_val  = math.ceil(raw_max / 200) * 200
 
-    W, H = 680, 230
-    PL, PR, PT, PB = 44, 14, 18, 30
-    CW, CH = W - PL - PR, H - PT - PB
-    n = len(recent)
+    W, H   = 200, 56
+    PT, PB = 7, 7
+    CH     = H - PT - PB
 
-    def cx(i): return PL + (i / (n - 1) * CW if n > 1 else CW / 2)
-    def cy(ms): return PT + CH * (1 - ms / max_val)
-
-    svg = []
-    # Soft glow so the thin lines read as crisp neon on the dark plot
-    svg.append(
-        '<defs><filter id="lglow" x="-10%" y="-20%" width="120%" height="140%">'
-        '<feGaussianBlur stdDeviation="2" result="b"/>'
-        '<feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>'
-    )
-    svg.append(f'<rect x="{PL}" y="{PT}" width="{CW}" height="{CH}" fill="#0a0d13" rx="6"/>')
-
-    # Horizontal grid lines (rounded labels)
-    rows = 4
-    for i in range(rows + 1):
-        gy = PT + i * CH / rows
-        ms_val = max_val * (rows - i) / rows
-        svg.append(f'<line x1="{PL}" y1="{gy:.1f}" x2="{PL+CW}" y2="{gy:.1f}" stroke="#161c28" stroke-width="1"/>')
-        svg.append(f'<text x="{PL-8}" y="{gy+3.5:.1f}" text-anchor="end" font-size="9" fill="#3d4451">{int(ms_val)}</text>')
-
-    # Threshold danger band + line
-    ty = cy(THRESHOLD)
-    if PT <= ty <= PT + CH:
-        svg.append(f'<rect x="{PL}" y="{PT}" width="{CW}" height="{ty-PT:.1f}" fill="#f85149" opacity="0.05" rx="6"/>')
-        svg.append(f'<line x1="{PL}" y1="{ty:.1f}" x2="{PL+CW}" y2="{ty:.1f}" stroke="#f85149" stroke-width="1.5" stroke-dasharray="4,4" opacity="0.5"/>')
-
-    # Smooth lines + focal "current" dot
+    cards = ''
     for lang in LANGS:
-        if lang not in data:
+        if lang not in series:
             continue
         color = LANG_COLORS[lang]
-        raw = [(cx(i), cy(v), v, recent[i]) for i, v in enumerate(data[lang]) if v > 0]
-        if not raw:
-            continue
-        pts = [(x, y) for x, y, _, _ in raw]
-        path_d = smooth_path(pts, PT, PT + CH)
-        if path_d:
-            svg.append(f'<path d="{path_d}" fill="none" stroke="{color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" opacity="0.95" filter="url(#lglow)"/>')
-        # Invisible hover targets keep tooltips without visual clutter
-        for x, y, ms, run in raw:
-            ds, ts = run.split('_')
-            dp = ds.split('-')
-            tip = f"{dp[1]}/{dp[2]} {ts.replace('-',':')} · {LANG_LABELS[lang]} {ms}ms"
-            svg.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="6" fill="transparent"><title>{tip}</title></circle>')
-        # Latest value = solid focal dot with ring
-        lx, ly, lms, _ = raw[-1]
-        ring = '#f85149' if lms >= THRESHOLD else color
-        svg.append(f'<circle cx="{lx:.1f}" cy="{ly:.1f}" r="4" fill="{ring}" stroke="#161b22" stroke-width="2"/>')
+        vals  = series[lang]
+        pos   = [v for v in vals if v > 0]
+        avg_ms = round(sum(pos) / len(pos))
+        max_ms = max(pos)
+        latest = next((v for v in reversed(vals) if v > 0), 0)
+        n = len(vals)
 
-    # X-axis labels
-    step = max(1, n // 6)
-    for i, run in enumerate(recent):
-        if i % step == 0 or i == n - 1:
-            ds, ts = run.split('_')
-            dp = ds.split('-')
-            lx = cx(i)
-            svg.append(f'<text x="{lx:.1f}" y="{H-PB+14}" text-anchor="middle" font-size="8" fill="#3d4451">{dp[1]}/{dp[2]}</text>')
-            svg.append(f'<text x="{lx:.1f}" y="{H-PB+23}" text-anchor="middle" font-size="7" fill="#2d3340">{ts.replace("-",":")}</text>')
+        def cx(i): return (i / (n - 1) * W) if n > 1 else W / 2
+        def cy(ms): return PT + CH * (1 - ms / max_val)
 
-    chart_svg = f'<svg viewBox="0 0 {W} {H}" width="100%" style="display:block">{"".join(svg)}</svg>'
+        raw  = [(cx(i), cy(v), v) for i, v in enumerate(vals) if v > 0]
+        pts  = [(x, y) for x, y, _ in raw]
+        line = smooth_path(pts)
 
-    stats = []
-    for lang in LANGS:
-        if lang not in data:
-            continue
-        pos = [v for v in data[lang] if v > 0]
-        avg_ms = round(sum(pos) / len(pos)) if pos else 0
-        max_ms = max(pos) if pos else 0
-        stats.append((lang, LANG_COLORS[lang], avg_ms, max_ms))
+        gid = f'sg-{lang}'
+        body = [
+            f'<defs><linearGradient id="{gid}" x1="0" x2="0" y1="0" y2="1">'
+            f'<stop offset="0" stop-color="{color}" stop-opacity="0.34"/>'
+            f'<stop offset="1" stop-color="{color}" stop-opacity="0"/></linearGradient></defs>'
+        ]
+        ty = cy(THRESHOLD)
+        if PT <= ty <= PT + CH:
+            body.append(f'<line x1="0" y1="{ty:.1f}" x2="{W}" y2="{ty:.1f}" stroke="#e5534b" stroke-width="1" stroke-dasharray="3,3" opacity="0.45"/>')
+        if line:
+            area = line + f' L{pts[-1][0]:.1f},{H-PB:.1f} L{pts[0][0]:.1f},{H-PB:.1f} Z'
+            body.append(f'<path d="{area}" fill="url(#{gid})"/>')
+            body.append(f'<path d="{line}" fill="none" stroke="{color}" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"/>')
+        if raw:
+            lx, ly, _ = raw[-1]
+            body.append(f'<circle cx="{lx:.1f}" cy="{ly:.1f}" r="2.8" fill="{color}" stroke="#0d1117" stroke-width="1.5"/>')
 
-    return chart_svg, stats
-
-line_chart_svg, perf_stats = make_line_chart()
-
-perf_stats_html = ''
-if perf_stats:
-    cards = ''
-    for lang, color, avg_ms, max_ms in perf_stats:
-        avg_cls = 'stat-danger' if avg_ms >= THRESHOLD else ''
-        max_cls = 'stat-max-danger' if max_ms >= THRESHOLD else ''
+        spark = (
+            f'<svg viewBox="0 0 {W} {H}" width="100%" height="{H}" '
+            f'preserveAspectRatio="none" style="display:block">{"".join(body)}</svg>'
+        )
+        cur_cls = 'spark-cur--danger' if latest >= THRESHOLD else ''
         cards += (
-            f'<div class="perf-stat">'
-            f'<div class="perf-stat-head">'
+            f'<div class="spark-card">'
+            f'<div class="spark-head">'
             f'<span class="lang-dot" style="background:{color}"></span>'
-            f'<span class="perf-stat-lang">{LANG_LABELS[lang]}</span>'
+            f'<span class="spark-lang">{LANG_LABELS[lang]}</span>'
+            f'<span class="spark-cur {cur_cls}">{latest}<span class="unit">ms</span></span>'
             f'</div>'
-            f'<div class="perf-stat-avg {avg_cls}">{avg_ms}<span class="unit">ms</span></div>'
-            f'<div class="perf-stat-max {max_cls}">최대 {max_ms}ms</div>'
+            f'{spark}'
+            f'<div class="spark-foot">평균 {avg_ms} · 최대 {max_ms}<span class="unit-sm">ms</span></div>'
             f'</div>'
         )
-    perf_stats_html = f'<div class="perf-stat-row">{cards}</div>'
+    return f'<div class="spark-grid">{cards}</div>'
+
+sparklines_html = make_lang_sparklines()
 
 # ── 90-day heatmap bar chart ──────────────────────────────────────────
 def make_heatmap():
@@ -560,18 +521,19 @@ css = """
   .threshold-note { font-size: .72rem; color: #484f58; margin-left: auto; }
   .threshold-note span { color: #f85149; font-weight: 600; }
 
-  /* Perf stat cards (chart legend) */
-  .perf-stat-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-bottom: 16px; }
-  .perf-stat { background: #0d1117; border: 1px solid #21262d; border-radius: 8px; padding: 10px 12px; }
-  .perf-stat-head { display: flex; align-items: center; gap: 6px; margin-bottom: 7px; }
+  /* Per-language sparkline cards (small multiples) */
   .lang-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-  .perf-stat-lang { font-size: .72rem; color: #8b949e; font-weight: 600; }
-  .perf-stat-avg { font-size: 1.3rem; font-weight: 800; color: #e6edf3; line-height: 1;
-                   font-variant-numeric: tabular-nums; }
-  .perf-stat-avg .unit { font-size: .7rem; font-weight: 600; color: #6e7681; margin-left: 2px; }
-  .perf-stat-avg.stat-danger { color: #f85149; }
-  .perf-stat-max { font-size: .68rem; color: #6e7681; margin-top: 4px; font-variant-numeric: tabular-nums; }
-  .perf-stat-max.stat-max-danger { color: #d29922; font-weight: 600; }
+  .spark-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .spark-card { background: #0d1117; border: 1px solid #21262d; border-radius: 10px;
+                padding: 11px 13px 9px; }
+  .spark-head { display: flex; align-items: center; gap: 6px; margin-bottom: 9px; }
+  .spark-lang { font-size: .73rem; color: #adbac7; font-weight: 600; }
+  .spark-cur { margin-left: auto; font-size: 1.05rem; font-weight: 800; color: #f0f6fc;
+               line-height: 1; font-variant-numeric: tabular-nums; }
+  .spark-cur .unit { font-size: .6rem; font-weight: 600; color: #6e7681; margin-left: 1px; }
+  .spark-cur--danger { color: #ff7b72; }
+  .spark-foot { font-size: .64rem; color: #6e7681; margin-top: 8px;
+                font-variant-numeric: tabular-nums; }
 
   /* Heatmap */
   .heatmap-legend { display: flex; gap: 14px; margin-bottom: 10px; flex-wrap: wrap; }
@@ -725,6 +687,7 @@ css = """
   @media (max-width: 540px) {
     .ov-grid { grid-template-columns: 1fr 1fr; }
     .ov-grid > .ov-card:last-child { grid-column: span 2; }
+    .spark-grid { grid-template-columns: repeat(2, 1fr); }
     .perf-summary { display: none; }
   }
 """
@@ -753,11 +716,10 @@ html = f"""<!DOCTYPE html>
 
   <div class="chart-card">
     <div class="chart-header">
-      <span class="section-title">서버 응답 시간 추이<span class="section-sub">최근 24회</span></span>
+      <span class="section-title">서버 응답 시간 추이<span class="section-sub">언어별 · 최근 24회</span></span>
       <span class="threshold-note">위험 임계치 <span>{THRESHOLD}ms</span></span>
     </div>
-    {perf_stats_html}
-    {line_chart_svg}
+    {sparklines_html}
   </div>
 
   <div class="card">
