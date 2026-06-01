@@ -17,6 +17,33 @@ if not WEBHOOK:
     print('SLACK_WEBHOOK_URL 미설정 — 스킵')
     sys.exit(0)
 
+
+def post(payload, label=''):
+    if os.environ.get('DRY_RUN') == '1':
+        print(f'[DRY_RUN] {label} 미리보기:')
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+    req = urllib.request.Request(
+        WEBHOOK,
+        data=json.dumps(payload).encode('utf-8'),
+        headers={'Content-Type': 'application/json'},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            print(f'Slack 발송 완료 ({label}) — HTTP {r.status}')
+    except Exception as e:
+        print(f'Slack 발송 실패: {e}')
+        sys.exit(1)
+
+
+# 연동 테스트 모드 (Actions의 'Slack 연동 테스트' 워크플로우에서 사용)
+if os.environ.get('SLACK_TEST') == '1':
+    post({'attachments': [{'color': '#58a6ff', 'blocks': [
+        {'type': 'section', 'text': {'type': 'mrkdwn',
+         'text': '🔔 *이지랩 헬스체크* · Slack 연동 테스트\n이 메시지가 보이면 웹훅 설정이 정상입니다 ✅'}},
+    ]}]}, '테스트')
+    sys.exit(0)
+
 cur  = os.environ.get('HEALTH_STATUS', 'UNKNOWN')
 prev = os.environ.get('PREV_STATUS', 'NONE')
 _dt = os.environ.get('RUN_DATETIME', '')  # "2026-06-01_15-20"
@@ -76,19 +103,4 @@ payload = {
     }]
 }
 
-if os.environ.get('DRY_RUN') == '1':
-    print(f'[DRY_RUN] {"신규장애" if is_new_fail else "복구"} 메시지 미리보기:')
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
-    sys.exit(0)
-
-req = urllib.request.Request(
-    WEBHOOK,
-    data=json.dumps(payload).encode('utf-8'),
-    headers={'Content-Type': 'application/json'},
-)
-try:
-    with urllib.request.urlopen(req, timeout=10) as r:
-        print(f'Slack 발송 완료 ({"신규장애" if is_new_fail else "복구"}) — HTTP {r.status}')
-except Exception as e:
-    print(f'Slack 발송 실패: {e}')
-    sys.exit(1)
+post(payload, '신규장애' if is_new_fail else '복구')

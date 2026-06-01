@@ -1,0 +1,24 @@
+name: Slack 연동 테스트
+
+# 헬스체크 전체를 돌리지 않고 Slack 웹훅만 빠르게 검증 (~20초).
+# Actions 탭 → 이 워크플로우 → Run workflow 로 수동 실행.
+on:
+  workflow_dispatch:
+
+jobs:
+  slack-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 코드 체크아웃
+        uses: actions/checkout@v6
+
+      - name: Slack 테스트 메시지 발송
+        env:
+          SLACK_TEST: '1'
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "::error::SLACK_WEBHOOK_URL 시크릿이 없습니다. 레포 Settings → Secrets → Actions 에 등록하세요."
+            exit 1
+          fi
+          python3 scripts/notify_slack.py
