@@ -12,7 +12,7 @@ try:
 except Exception:
     h[datetime_key] = {}
 
-keys = sorted(h.keys(), reverse=True)[:180]
+keys = sorted(h.keys(), reverse=True)[:500]
 h = {k: h[k] for k in keys}
 
 with open('/tmp/perf-history.json', 'w') as f:

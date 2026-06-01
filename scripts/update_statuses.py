@@ -7,7 +7,7 @@ with open('/tmp/statuses.json') as f:
     s = json.load(f)
 
 s[datetime_key] = status_val
-keys = sorted(s.keys(), reverse=True)[:180]
+keys = sorted(s.keys(), reverse=True)[:500]
 s = {k: s[k] for k in keys}
 
 with open('/tmp/statuses.json', 'w') as f:

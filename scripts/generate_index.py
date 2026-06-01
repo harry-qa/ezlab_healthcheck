@@ -707,7 +707,7 @@ html = f"""<!DOCTYPE html>
   <header class="header">
     <div class="header-top">
       <h1>이지랩 헬스체크 대시보드</h1>
-      <span class="info-tag"><i class="info-icon">ⓘ</i> 최근 180개 리포트 기준 · 일 24회 자동 실행</span>
+      <span class="info-tag"><i class="info-icon">ⓘ</i> 최근 {total}개 리포트 기준 · 일 24회 자동 실행</span>
     </div>
     <p class="header-sub">마지막 실행: {cur_display} KST</p>
   </header>
