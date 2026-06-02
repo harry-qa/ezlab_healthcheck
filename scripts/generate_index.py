@@ -39,7 +39,7 @@ failures_history = load_json(failures_file, {})
 LANGS       = ['ko', 'en', 'jp', 'tw']
 LANG_LABELS = {'ko': '한국어', 'en': '영어', 'jp': '일본어', 'tw': '중국어'}
 BASE_URL    = 'https://ezlab.im'
-THRESHOLD   = 500  # ms danger threshold
+THRESHOLD   = 500  # ms danger threshold (TTFB 첫 응답 기준 · 본문 다운로드 제외)
 
 # ── Overview stats ────────────────────────────────────────────────────
 total  = len(entries)
@@ -377,7 +377,7 @@ for midx, month in enumerate(sorted_months_list):
             curl_rows = ''
             for lang in LANGS:
                 url = f'{BASE_URL}/{lang}'
-                cmd = f'curl -s -o /dev/null -w "%{{http_code}}" {url}'
+                cmd = f'curl -s -o /dev/null -w "%{{time_starttransfer}}s" {url}'
                 ms  = perf.get(lang, 0)
                 ms_info = f'{ms}ms' if ms > 0 else '—'
                 ms_cls  = ' curl-time-slow' if ms > 0 and ms >= THRESHOLD else ''
@@ -392,7 +392,7 @@ for midx, month in enumerate(sorted_months_list):
 
             perf_section = (
                 f'<div class="dp-section">'
-                f'<div class="dp-title">서버 응답 시간</div>'
+                f'<div class="dp-title">서버 첫 응답 시간 (TTFB · 3회 중앙값)</div>'
                 f'<table class="perf-tbl"><tbody>{perf_rows}</tbody></table>'
                 f'</div>'
             ) if perf_rows else ''
@@ -726,7 +726,7 @@ html = f"""<!DOCTYPE html>
 
   <div class="chart-card">
     <div class="chart-header">
-      <span class="section-title">서버 응답 시간 추이<span class="section-sub">언어별 · 최근 24회</span></span>
+      <span class="section-title">서버 첫 응답(TTFB) 추이<span class="section-sub">언어별 · 최근 24회 · 3회 중앙값</span></span>
       <span class="threshold-note">위험 임계치 <span>{THRESHOLD}ms</span></span>
     </div>
     {sparklines_html}

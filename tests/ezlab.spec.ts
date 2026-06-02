@@ -1,9 +1,33 @@
 import { test, expect } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as https from 'https';
 
 const SCREENSHOT_DIR = 'test-results/screenshots';
 fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
+
+// 서버 첫 응답 시간(TTFB) 측정 — 응답 헤더(첫 바이트) 수신까지만 재고 본문 다운로드는 제외한다.
+// (기존 request.get 방식은 본문 300KB까지 다 받는 시간을 재서, 미국 러너에선 본문 다운로드 탓에
+//  서버가 멀쩡해도 500ms를 넘겼다. TTFB는 서버 처리 체감에 훨씬 가깝다.)
+// keepAlive 에이전트로 연결을 재사용 → 워밍업 1회 후엔 DNS/TLS 핸드셰이크 비용 없이 순수 응답만 본다.
+function measureTTFB(
+  url: string,
+  headers: Record<string, string>,
+  agent: https.Agent,
+  timeoutMs = 20000,
+): Promise<{ status: number; ttfb: number }> {
+  return new Promise((resolve, reject) => {
+    const start = Date.now();
+    const req = https.get(url, { headers, agent }, (res) => {
+      const ttfb = Date.now() - start;          // 응답 헤더 수신 시점 = TTFB
+      res.resume();                              // 본문은 버리되 소켓은 비워 keep-alive 재사용 유지
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, ttfb }));
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('timeout')));
+  });
+}
 
 test.afterEach(async ({ page }, testInfo) => {
   if (testInfo.status !== testInfo.expectedStatus) {
@@ -133,35 +157,48 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   // STEP 1: 다국어 서버 생존 확인
   // ══════════════════════════════════════════════════════════════════
   await test.step('STEP 1 · 다국어 서버 생존 확인 (ko / en / jp / tw)', async () => {
-    for (const lang of languages) {
-      await test.step(`[서버][${lang}] 응답 확인`, async () => {
-        const serverUrl = `${baseUrl}/${lang}`;
-        visitedUrls.add(serverUrl); // 최종 집계에 포함
-        try {
-          const startTime = Date.now();
-          const res = await request.get(serverUrl, { headers });
-          const responseTime = Date.now() - startTime;
-          const status = res.status();
+    // 언어 간 연결을 재사용하는 keep-alive 에이전트 (전부 동일 호스트라 핸드셰이크 1회면 충분).
+    const agent = new https.Agent({ keepAlive: true, maxSockets: 1 });
+    try {
+      for (const lang of languages) {
+        await test.step(`[서버][${lang}] 응답 확인`, async () => {
+          const serverUrl = `${baseUrl}/${lang}`;
+          visitedUrls.add(serverUrl); // 최종 집계에 포함
+          try {
+            // 워밍업 1회(DNS/TLS·경로 캐시 비용 분리) → 본측정 3회의 중앙값을 TTFB로 채택.
+            await measureTTFB(serverUrl, headers, agent);
+            const samples: number[] = [];
+            let status = 0;
+            for (let i = 0; i < 3; i++) {
+              const r = await measureTTFB(serverUrl, headers, agent);
+              status = r.status;
+              samples.push(r.ttfb);
+            }
+            samples.sort((a, b) => a - b);
+            const responseTime = samples[1]; // 3회 중앙값 (본문 다운로드 제외 TTFB)
 
-          if (status === 200) {
-            passCount++;
-            serverTimes[lang] = responseTime;
-            console.log(`[PASS][${lang}] 서버 ${status} (${responseTime}ms)`);
-          } else {
+            if (status === 200) {
+              passCount++;
+              serverTimes[lang] = responseTime;
+              console.log(`[PASS][${lang}] 서버 ${status} (TTFB ${responseTime}ms · ${samples.join('/')})`);
+            } else {
+              failCount++;
+              const ts = kstNow();
+              console.log(`[FAIL][${lang}] 서버 ${status} (TTFB ${responseTime}ms) @ ${ts}`);
+              failRecords.push({ step: 'STEP1·서버생존', type: '서버', lang, url: serverUrl, status, responseTime, symptom: `HTTP ${status} 응답`, timestamp: ts });
+            }
+            expect.soft(status, `상태코드 확인 (status: ${status}, url: ${serverUrl})`).toBe(200);
+          } catch {
             failCount++;
             const ts = kstNow();
-            console.log(`[FAIL][${lang}] 서버 ${status} (${responseTime}ms) @ ${ts}`);
-            failRecords.push({ step: 'STEP1·서버생존', type: '서버', lang, url: serverUrl, status, responseTime, symptom: `HTTP ${status} 응답`, timestamp: ts });
+            console.log(`[ERROR][${lang}] 서버 접속 불가 @ ${ts}`);
+            failRecords.push({ step: 'STEP1·서버생존', type: '서버', lang, url: serverUrl, status: 0, responseTime: 0, symptom: '접속 불가 / 타임아웃', timestamp: ts });
+            expect.soft(null, `접속 불가 (url: ${serverUrl})`).not.toBeNull();
           }
-          expect.soft(status, `상태코드 확인 (status: ${status}, url: ${serverUrl})`).toBe(200);
-        } catch {
-          failCount++;
-          const ts = kstNow();
-          console.log(`[ERROR][${lang}] 서버 접속 불가 @ ${ts}`);
-          failRecords.push({ step: 'STEP1·서버생존', type: '서버', lang, url: serverUrl, status: 0, responseTime: 0, symptom: '접속 불가 / 타임아웃', timestamp: ts });
-          expect.soft(null, `접속 불가 (url: ${serverUrl})`).not.toBeNull();
-        }
-      });
+        });
+      }
+    } finally {
+      agent.destroy();
     }
   });
 
