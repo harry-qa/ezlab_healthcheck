@@ -2,7 +2,7 @@ name: 이지랩 헬스체크
 
 on:
   schedule:
-    - cron: '0 * * * *'  # 매시 정각 (KST 기준 24회/일)
+    - cron: '0,30 * * * *'  # 매시 0·30분 (30분 주기, 48회/일) — 장애 최대 ~30분 내 감지
   workflow_dispatch:
 
 permissions:

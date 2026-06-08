@@ -10,12 +10,17 @@ Slack 알림 — 상태 전환 시에만 발송(스팸 방지).
   HEALTH_STATUS, PREV_STATUS, RUN_DATETIME, RUN_URL, PAGES_URL
 report-status.json 에서 상세(failCount/warnCount/failures)를 읽는다.
 """
-import os, json, sys, urllib.request
+import os, json, sys, time, urllib.request
 
 WEBHOOK = os.environ.get('SLACK_WEBHOOK_URL', '').strip()
 if not WEBHOOK:
     print('SLACK_WEBHOOK_URL 미설정 — 스킵')
     sys.exit(0)
+
+# 일시적 네트워크 오류로 알림(특히 FAIL)이 유실되지 않도록 재시도+백오프.
+# 과거 FAIL 알림이 단일 urlopen timeout으로 그대로 날아간 사례가 있어 도입.
+ATTEMPTS = 4
+TIMEOUT = 15
 
 
 def post(payload, label=''):
@@ -23,17 +28,24 @@ def post(payload, label=''):
         print(f'[DRY_RUN] {label} 미리보기:')
         print(json.dumps(payload, ensure_ascii=False, indent=2))
         return
-    req = urllib.request.Request(
-        WEBHOOK,
-        data=json.dumps(payload).encode('utf-8'),
-        headers={'Content-Type': 'application/json'},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            print(f'Slack 발송 완료 ({label}) — HTTP {r.status}')
-    except Exception as e:
-        print(f'Slack 발송 실패: {e}')
-        sys.exit(1)
+    data = json.dumps(payload).encode('utf-8')
+    last_err = None
+    for i in range(1, ATTEMPTS + 1):
+        req = urllib.request.Request(
+            WEBHOOK, data=data, headers={'Content-Type': 'application/json'},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+                print(f'Slack 발송 완료 ({label}) — HTTP {r.status} (시도 {i}/{ATTEMPTS})')
+                return
+        except Exception as e:
+            last_err = e
+            print(f'Slack 발송 시도 {i}/{ATTEMPTS} 실패: {e}')
+            if i < ATTEMPTS:
+                backoff = min(2 ** i, 30)  # 2s, 4s, 8s...
+                time.sleep(backoff)
+    print(f'Slack 발송 최종 실패 ({label}): {last_err}')
+    sys.exit(1)
 
 
 # 연동 테스트 모드 (Actions의 'Slack 연동 테스트' 워크플로우에서 사용)
@@ -55,10 +67,12 @@ else:
 run_url   = os.environ.get('RUN_URL', '')
 pages_url = os.environ.get('PAGES_URL', '')
 
-is_new_fail = cur == 'FAIL' and prev != 'FAIL'
-is_recovery = cur != 'FAIL' and prev == 'FAIL'
-if not (is_new_fail or is_recovery):
-    print(f'전환 아님(cur={cur}, prev={prev}) — 스킵')
+is_fail     = cur == 'FAIL'
+is_new_fail = is_fail and prev != 'FAIL'      # PASS/WARN → FAIL (장애 시작)
+is_recovery = cur != 'FAIL' and prev == 'FAIL'  # FAIL → 정상 (복구)
+# FAIL인 동안에는 매 런 재알림(놓침·유실 방지). 복구는 전환 시 1회.
+if not (is_fail or is_recovery):
+    print(f'알림 대상 아님(cur={cur}, prev={prev}) — 스킵')
     sys.exit(0)
 
 try:
@@ -76,8 +90,8 @@ if pages_url: links.append(f'<{pages_url}|📊 대시보드>')
 if run_url:   links.append(f'<{run_url}|🔧 실행 로그>')
 link_line = '   ·   '.join(links)
 
-if is_new_fail:
-    header = '🚨 이지랩 헬스체크 *장애 감지*'
+if is_fail:
+    header = '🚨 이지랩 헬스체크 *장애 감지*' if is_new_fail else '🚨 이지랩 헬스체크 *장애 지속 중*'
     color  = '#e5534b'
     types  = ', '.join(sorted({f.get('type', '-') for f in failures})) or '-'
     lines  = [f'*FAIL {fail_c}* · WARN {warn_c} · PASS {pass_c}', f'영향 범위: *{types}*']
@@ -103,4 +117,4 @@ payload = {
     }]
 }
 
-post(payload, '신규장애' if is_new_fail else '복구')
+post(payload, '신규장애' if is_new_fail else ('장애지속' if is_fail else '복구'))
