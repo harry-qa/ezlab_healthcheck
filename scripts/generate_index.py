@@ -2,6 +2,7 @@ import sys
 import re
 import json
 import math
+from html import escape
 from datetime import datetime, timedelta
 from collections import defaultdict
 
@@ -409,12 +410,14 @@ for midx, month in enumerate(sorted_months_list):
                 f_rows = ''
                 for fr in run_failures:
                     icon     = type_icons.get(fr.get('type', ''), '⚠️')
-                    f_url    = fr.get('url', '-')
+                    # 점검 대상 사이트에서 크롤링한 값(url/symptom 등)이 그대로 HTML에 들어가므로
+                    # escape로 코드 실행/속성 탈출 차단 (html.escape는 따옴표까지 이스케이프 → title 속성도 안전).
+                    f_url    = escape(str(fr.get('url', '-')))
                     f_status = fr.get('status', 0)
                     f_time   = fr.get('responseTime', 0)
-                    f_sym    = fr.get('symptom', '-')
-                    f_step   = fr.get('step', '-')
-                    f_lang   = fr.get('lang', '-')
+                    f_sym    = escape(str(fr.get('symptom', '-')))
+                    f_step   = escape(str(fr.get('step', '-')))
+                    f_lang   = escape(str(fr.get('lang', '-')))
                     status_cls = 'fs-5xx' if f_status >= 500 else ('fs-4xx' if f_status >= 400 else 'fs-other')
                     status_txt = str(f_status) if f_status > 0 else 'timeout'
                     time_txt   = f'{f_time}ms' if f_time > 0 else '—'
