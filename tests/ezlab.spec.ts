@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as https from 'https';
+import * as tls from 'tls';
 
 const SCREENSHOT_DIR = 'test-results/screenshots';
 fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
@@ -26,6 +27,27 @@ function measureTTFB(
     });
     req.on('error', reject);
     req.setTimeout(timeoutMs, () => req.destroy(new Error('timeout')));
+  });
+}
+
+// SSL 인증서 만료일까지 남은 일수를 잰다. TLS 핸드셰이크로 서버 인증서만 읽고 즉시 끊는다.
+// 만료되면 전 서비스가 한 번에 죽으므로, 만료 전에 미리 경고(WARN)/장애(FAIL)로 띄우기 위함.
+function checkCertExpiry(
+  host: string,
+  port = 443,
+  timeoutMs = 10000,
+): Promise<{ daysLeft: number; validTo: string }> {
+  return new Promise((resolve, reject) => {
+    const socket = tls.connect({ host, port, servername: host, timeout: timeoutMs }, () => {
+      const cert = socket.getPeerCertificate();
+      socket.end();
+      if (!cert || !cert.valid_to) { reject(new Error('인증서 정보 없음')); return; }
+      const validTo  = new Date(cert.valid_to);
+      const daysLeft = Math.floor((validTo.getTime() - Date.now()) / 86400000);
+      resolve({ daysLeft, validTo: cert.valid_to });
+    });
+    socket.on('error', reject);
+    socket.on('timeout', () => { socket.destroy(); reject(new Error('timeout')); });
   });
 }
 
@@ -684,6 +706,51 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   });
 
   // ══════════════════════════════════════════════════════════════════
+  // STEP 9: SSL 인증서 만료 점검 (ezlab.im / ezdown.kr)
+  //   만료되면 전 서비스가 동시에 죽으므로 사전 경고가 목적.
+  //   D-7 이하: FAIL(Slack·이슈로 알림 — 자동갱신이 안 됐다는 신호)
+  //   D-14 이하: WARN(대시보드 조기 경고)  /  만료됨: FAIL
+  // ══════════════════════════════════════════════════════════════════
+  await test.step('STEP 9 · SSL 인증서 만료 점검 (ezlab.im / ezdown.kr)', async () => {
+    const CERT_FAIL_DAYS = 7;
+    const CERT_WARN_DAYS = 14;
+    const certHosts = ['ezlab.im', 'ezdown.kr'];
+    for (const host of certHosts) {
+      await test.step(`[인증서][${host}] 만료일 확인`, async () => {
+        try {
+          const { daysLeft, validTo } = await checkCertExpiry(host);
+          if (daysLeft < 0 || daysLeft <= CERT_FAIL_DAYS) {
+            failCount++;
+            const ts = kstNow();
+            const symptom = daysLeft < 0
+              ? `SSL 인증서 만료됨 (만료일 ${validTo})`
+              : `SSL 인증서 만료 임박 D-${daysLeft} (만료일 ${validTo}) — 자동갱신 확인 필요`;
+            console.log(`[FAIL][인증서][${host}] ${symptom} @ ${ts}`);
+            failRecords.push({ step: 'STEP9·인증서', type: '인증서', lang: '-', url: `https://${host}`, status: 0, responseTime: 0, symptom, timestamp: ts });
+            expect.soft(daysLeft, `[인증서][${host}] ${symptom}`).toBeGreaterThan(CERT_FAIL_DAYS);
+          } else if (daysLeft <= CERT_WARN_DAYS) {
+            warnCount++;
+            const ts = kstNow();
+            const symptom = `SSL 인증서 만료 임박 D-${daysLeft} (만료일 ${validTo})`;
+            console.log(`[WARN][인증서][${host}] ${symptom}`);
+            failRecords.push({ step: 'STEP9·인증서', type: '인증서', lang: '-', url: `https://${host}`, status: 0, responseTime: 0, symptom, timestamp: ts });
+          } else {
+            passCount++;
+            console.log(`[PASS][인증서][${host}] 만료까지 D-${daysLeft} (만료일 ${validTo})`);
+          }
+        } catch (e) {
+          // 핸드셰이크 실패는 STEP 1에서 서버 장애로 이미 잡히므로 여기선 WARN으로만.
+          warnCount++;
+          const ts = kstNow();
+          const msg = (e as Error).message || '확인 실패';
+          console.log(`[WARN][인증서][${host}] 확인 실패: ${msg} @ ${ts}`);
+          failRecords.push({ step: 'STEP9·인증서', type: '인증서', lang: '-', url: `https://${host}`, status: 0, responseTime: 0, symptom: `인증서 확인 실패: ${msg}`, timestamp: ts });
+        }
+      });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
   // 최종 요약 + 배지용 JSON 저장
   // ══════════════════════════════════════════════════════════════════
   const totalCount = passCount + failCount + warnCount;
@@ -718,6 +785,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
     `  STEP 6 · 깨진 이미지 감지`,
     `  STEP 7 · 언어별 로그인 버튼 렌더링 확인`,
     `  STEP 8 · 이지다운(ezdown.kr) 정보 페이지 점검`,
+    `  STEP 9 · SSL 인증서 만료 점검 (ezlab.im / ezdown.kr)`,
   ];
 
   if (failRecords.length > 0) {
@@ -762,7 +830,8 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
         r.type === '콘텐츠'  ? '프론트엔드 배포 확인' :
         r.type === '이미지'  ? '이미지 서버 / CDN 확인' :
         r.type === '로그인'  ? '로그인 페이지 렌더링 확인' :
-        r.type === '이지다운' ? '이지다운 사이트(ezdown.kr) 확인' : '담당팀 확인 요청'
+        r.type === '이지다운' ? '이지다운 사이트(ezdown.kr) 확인' :
+        r.type === '인증서'  ? 'SSL 인증서 갱신 필요 (CA/호스팅 인증서 자동갱신 확인)' : '담당팀 확인 요청'
       }`,
     ].join('\n')).join('\n\n');
 
