@@ -48,7 +48,10 @@ pass_c = sum(1 for e in entries if statuses.get(e) == 'PASS')
 fail_c = sum(1 for e in entries if statuses.get(e) == 'FAIL')
 warn_c = sum(1 for e in entries if statuses.get(e) == 'WARN')
 
-health_score = round(pass_c / total * 100, 1) if total else 0
+# Health Score는 사이트 상태가 실제 판정된 런만 분모로 사용 —
+# UNKNOWN(러너 인프라 문제로 미완주)이 사이트 점수를 깎지 않도록.
+scored = pass_c + warn_c + fail_c
+health_score = round(pass_c / scored * 100, 1) if scored else 0
 cur_status   = statuses.get(current_run, 'UNKNOWN')
 
 # 진짜 24시간 윈도우 — 실행이 시간당이 아니라(GitHub 스케줄러가 상당수 드랍)
@@ -87,7 +90,7 @@ overview_html = f'''
       <div class="ov-card">
         <div class="ov-label">Health Score</div>
         <div class="ov-value {score_cls}">{health_score}%</div>
-        <div class="ov-sub">최근 {total}회 기준</div>
+        <div class="ov-sub">최근 {scored}회 기준</div>
       </div>
       <div class="ov-card {status_card_cls}">
         <div class="ov-label">현재 시스템 상태</div>
@@ -720,7 +723,7 @@ html = f"""<!DOCTYPE html>
   <header class="header">
     <div class="header-top">
       <h1>이지랩 헬스체크 대시보드</h1>
-      <span class="info-tag"><i class="info-icon">ⓘ</i> 최근 {total}개 리포트 기준 · 일 24회 자동 실행</span>
+      <span class="info-tag"><i class="info-icon">ⓘ</i> 최근 {total}개 리포트 기준 · 30분 주기 자동 실행</span>
     </div>
     <p class="header-sub">마지막 실행: {cur_display} KST</p>
   </header>
@@ -848,11 +851,20 @@ function filterRuns(status, btn) {{
     // Restore default: only first month open, days collapsed, details closed
     var allRows = document.querySelectorAll('.run-row, .run-detail, .day-header, .month-header');
     allRows.forEach(function(r) {{ r.style.display = ''; }});
+    // 이전 필터가 숨긴 월 헤더 복원 — 안 풀면 해당 월이 전체 탭에서 사라진 채 남는다.
+    // 화살표도 접힘(▶)으로 초기화해 필터 모드의 ▼ 잔상 제거.
+    document.querySelectorAll('.month-header').forEach(function(r) {{
+      r.classList.remove('hidden');
+      var arrow = document.getElementById('arrow-' + r.dataset.gid);
+      if (arrow) arrow.textContent = '▶';
+    }});
     document.querySelectorAll('.run-row, .run-detail').forEach(function(r) {{
       r.classList.add('hidden');
     }});
     document.querySelectorAll('.day-header').forEach(function(r) {{
       if (!r.classList.contains('hidden')) r.classList.add('hidden');
+      var arrow = document.getElementById('arrow-' + r.dataset.gid);
+      if (arrow) arrow.textContent = '▶';
     }});
     // Re-open first month
     var firstMonth = document.querySelector('.month-header');
