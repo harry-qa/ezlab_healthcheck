@@ -3,7 +3,9 @@ Slack 알림 — 상태 전환 시에만 발송(스팸 방지).
 
 발송 조건(워크플로우에서 if로 1차 필터, 여기서 2차 확정):
 - 신규 장애 : HEALTH_STATUS == FAIL 이고 PREV_STATUS != FAIL
-- 복구      : HEALTH_STATUS != FAIL 이고 PREV_STATUS == FAIL
+- 실행 실패 : HEALTH_STATUS == UNKNOWN — 테스트가 완주하지 못해 결과 파일이 없음.
+              사이트가 아니라 헬스체크 자체의 이상이라 방치되면 감시 공백이 생기므로 반드시 알림.
+- 복구      : HEALTH_STATUS 가 PASS/WARN 이고 PREV_STATUS 가 FAIL/UNKNOWN
 
 환경변수:
   SLACK_WEBHOOK_URL (필수 — 없으면 조용히 스킵)
@@ -68,10 +70,11 @@ run_url   = os.environ.get('RUN_URL', '')
 pages_url = os.environ.get('PAGES_URL', '')
 
 is_fail     = cur == 'FAIL'
+is_unknown  = cur == 'UNKNOWN'                # 테스트 미완주 — 헬스체크 자체 이상
 is_new_fail = is_fail and prev != 'FAIL'      # PASS/WARN → FAIL (장애 시작)
-is_recovery = cur != 'FAIL' and prev == 'FAIL'  # FAIL → 정상 (복구)
-# FAIL인 동안에는 매 런 재알림(놓침·유실 방지). 복구는 전환 시 1회.
-if not (is_fail or is_recovery):
+is_recovery = cur in ('PASS', 'WARN') and prev in ('FAIL', 'UNKNOWN')  # 장애/실행실패 → 정상 (복구)
+# FAIL/UNKNOWN인 동안에는 매 런 재알림(놓침·유실 방지). 복구는 전환 시 1회.
+if not (is_fail or is_unknown or is_recovery):
     print(f'알림 대상 아님(cur={cur}, prev={prev}) — 스킵')
     sys.exit(0)
 
@@ -90,7 +93,13 @@ if pages_url: links.append(f'<{pages_url}|📊 대시보드>')
 if run_url:   links.append(f'<{run_url}|🔧 실행 로그>')
 link_line = '   ·   '.join(links)
 
-if is_fail:
+if is_unknown:
+    header = '⚠️ 이지랩 헬스체크 *실행 실패*'
+    color  = '#d29922'
+    body   = ('테스트가 완주하지 못해 결과 파일이 생성되지 않았습니다.\n'
+              '(브라우저 크래시 / 전체 타임아웃 / 의존성 설치 실패 가능성)\n'
+              '이번 런에서는 *사이트 상태가 확인되지 않았습니다* — 실행 로그를 확인해주세요.')
+elif is_fail:
     header = '🚨 이지랩 헬스체크 *장애 감지*' if is_new_fail else '🚨 이지랩 헬스체크 *장애 지속 중*'
     color  = '#e5534b'
     types  = ', '.join(sorted({f.get('type', '-') for f in failures})) or '-'
@@ -105,7 +114,7 @@ if is_fail:
 else:  # recovery
     header = '✅ 이지랩 헬스체크 *복구됨*'
     color  = '#3fb950'
-    body   = f'직전 FAIL → 현재 *{cur}* 로 복구되었습니다.\nPASS {pass_c} · WARN {warn_c} · FAIL {fail_c}'
+    body   = f'직전 {prev} → 현재 *{cur}* 로 복구되었습니다.\nPASS {pass_c} · WARN {warn_c} · FAIL {fail_c}'
 
 payload = {
     'attachments': [{
@@ -117,4 +126,4 @@ payload = {
     }]
 }
 
-post(payload, '신규장애' if is_new_fail else ('장애지속' if is_fail else '복구'))
+post(payload, '실행실패' if is_unknown else ('신규장애' if is_new_fail else ('장애지속' if is_fail else '복구')))

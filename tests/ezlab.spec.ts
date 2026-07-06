@@ -347,11 +347,14 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
             if (!rawUrl || rawUrl.startsWith('#') || rawUrl.startsWith('javascript:') || rawUrl.startsWith('mailto:')) continue;
             if (/\.(exe|apk|zip|dmg|msi|pkg)$/i.test(rawUrl)) continue; // 다운로드 파일 스킵
 
-            const url = rawUrl.startsWith('http')
-              ? rawUrl
-              : baseUrl + (rawUrl.startsWith('/') ? rawUrl : '/' + rawUrl);
+            // 현재 페이지 기준으로 상대경로를 정확히 해석 — 루트 기준 강제 결합 시
+            // href="sub/page" 류가 잘못된 URL이 되어 404 오탐이 날 수 있다.
+            const parsed = (() => { try { return new URL(rawUrl, pageUrl); } catch { return null; } })();
+            if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) continue; // tel: 등 비HTTP 스킴 스킵
+            parsed.hash = ''; // #fragment만 다른 동일 페이지 중복 점검 방지
+            const url = parsed.href;
 
-            const isInternal = url.startsWith(baseUrl);
+            const isInternal = parsed.origin === baseUrl;
             await checkUrl('UI', lang, url, isInternal);
 
             if (isInternal) {

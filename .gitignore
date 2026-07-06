@@ -16,3 +16,6 @@ node_modules/
 # Local QA artifacts
 report-status.json
 __pycache__/
+
+# 별도 프로젝트 (헬스체크 저장소와 무관 — venv 포함이라 실수 커밋 방지)
+ai-secretary/

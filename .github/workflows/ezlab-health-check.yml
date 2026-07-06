@@ -10,6 +10,11 @@ permissions:
   pages: write
   issues: write
 
+# 수동 실행이 스케줄 실행과 겹칠 때 gh-pages 통계 파일이 서로 덮어쓰는 race 방지 — 순차 실행
+concurrency:
+  group: health-check
+  cancel-in-progress: false
+
 jobs:
   health-check:
     runs-on: ubuntu-latest
@@ -93,8 +98,9 @@ jobs:
         continue-on-error: true
         run: python3 scripts/prune_old_reports.py
 
-      - name: Slack 알림 (장애 발생 / 복구 전환 시)
-        if: env.HEALTH_STATUS == 'FAIL' || env.PREV_STATUS == 'FAIL'
+      - name: Slack 알림 (장애 발생 / 실행 실패 / 복구 전환 시)
+        # UNKNOWN = 테스트 미완주(결과 파일 미생성) — 사이트가 아니라 헬스체크 자체의 이상이므로 반드시 알림
+        if: env.HEALTH_STATUS == 'FAIL' || env.HEALTH_STATUS == 'UNKNOWN' || env.PREV_STATUS == 'FAIL' || env.PREV_STATUS == 'UNKNOWN'
         continue-on-error: true
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
