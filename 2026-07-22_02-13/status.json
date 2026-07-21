@@ -1,0 +1,1 @@
+{"status":"FAIL","passCount":185,"failCount":1,"warnCount":0,"slowCount":0,"serverTimes":{"ko":218,"en":221,"jp":213,"tw":211},"failures":[{"step":"STEP4·다운로드","type":"다운로드","lang":"en","url":"https://ezlab.im/en/tool/ezfinder","status":404,"responseTime":10750,"symptom":"HTTP 404 응답","timestamp":"2026. 7. 22. 2시 12분 42초"}]}
