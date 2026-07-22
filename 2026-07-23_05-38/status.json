@@ -1,0 +1,1 @@
+{"status":"WARN","passCount":217,"failCount":0,"warnCount":1,"slowCount":0,"serverTimes":{"ko":203,"en":514,"jp":196,"tw":197},"failures":[{"step":"STEP4·다운로드","type":"다운로드","lang":"jp","url":"https://ezlab.im/jp/tool/ezcapture","status":200,"responseTime":439,"symptom":"간헐 실패 후 회복 (2회 시도)","timestamp":"2026. 7. 23. 5시 37분 32초","severity":"WARN"}]}
