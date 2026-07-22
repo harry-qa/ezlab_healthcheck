@@ -1,15 +1,20 @@
 """
-Slack 알림 — 상태 전환 시에만 발송(스팸 방지).
+Slack 알림 — 디바운스 기반 발송(스팸 방지).
 
 발송 조건(워크플로우에서 if로 1차 필터, 여기서 2차 확정):
-- 신규 장애 : HEALTH_STATUS == FAIL 이고 PREV_STATUS != FAIL
+- 장애 감지 : FAIL이 연속 FAIL_ALERT_THRESHOLD(기본 2)런 이어졌을 때 첫 알림.
+              단발 blip(1런 FAIL 후 자동 회복)은 침묵. 이후 FAIL 지속 시 매 런 '지속 중' 재알림.
 - 실행 실패 : HEALTH_STATUS == UNKNOWN — 테스트가 완주하지 못해 결과 파일이 없음.
-              사이트가 아니라 헬스체크 자체의 이상이라 방치되면 감시 공백이 생기므로 반드시 알림.
-- 복구      : HEALTH_STATUS 가 PASS/WARN 이고 PREV_STATUS 가 FAIL/UNKNOWN
+              사이트가 아니라 헬스체크 자체의 이상이라 방치되면 감시 공백이 생기므로 즉시(1회부터) 알림.
+- 간헐 불안정: 연속은 아니지만 최근 FLAP_WINDOW(기본 6)런 중 FLAP_DOWNS(기본 3)회 이상 다운.
+              FAIL↔PASS/WARN을 오가는 flapping이 연속 임계에 안 걸려 침묵하는 사각 보완.
+              조건을 '새로 넘는 순간' 1회만 발송(에피소드당 1회) — 복구 알림 없음.
+- 복구      : PASS/WARN 전환 && 직전 장애가 실제 알림된 수준(연속 임계 도달 또는 UNKNOWN)이었을 때 1회.
 
 환경변수:
   SLACK_WEBHOOK_URL (필수 — 없으면 조용히 스킵)
-  HEALTH_STATUS, PREV_STATUS, RUN_DATETIME, RUN_URL, PAGES_URL
+  HEALTH_STATUS, PREV_STATUS, RECENT_STATUSES(최신→과거, 현재 런 제외), RUN_DATETIME, RUN_URL, PAGES_URL
+  FAIL_ALERT_THRESHOLD(기본 2), FLAP_WINDOW(기본 6), FLAP_DOWNS(기본 3)
 report-status.json 에서 상세(failCount/warnCount/failures)를 읽는다.
 """
 import os, json, sys, time, urllib.request
@@ -107,8 +112,20 @@ is_new_fail = is_fail and streak == THRESHOLD        # 임계 도달 첫 알림 
 prev_alerted = prev_streak >= THRESHOLD or (bool(recent) and recent[0] == 'UNKNOWN')
 is_recovery  = cur in ('PASS', 'WARN') and _down(prev) and prev_alerted
 
-if not (down_alert or is_recovery):
-    print(f'알림 대상 아님(cur={cur}, prev={prev}, streak={streak}, prev_streak={prev_streak}, thr={THRESHOLD}) — 스킵')
+# 간헐 불안정(flapping): FAIL↔PASS/WARN 교차는 연속 임계에 안 걸려 위 로직만으론 영원히 침묵한다.
+# → 최근 W런(현재 포함) 중 다운이 K회 이상이면 '불안정'으로 1회 알림.
+#   직전 런 시점의 창(현재 제외)에서는 K 미만이었을 때만 발송 = 조건을 '새로 넘는 순간'에만 울려
+#   flapping이 이어져도 에피소드당 1회로 끝난다. 복구 알림은 내지 않는다(복구-재발 반복 스팸 방지).
+FLAP_WINDOW = max(2, int(os.environ.get('FLAP_WINDOW', '6')))
+FLAP_DOWNS  = max(2, int(os.environ.get('FLAP_DOWNS', '3')))
+downs_now   = sum(1 for s in [cur] + recent[:FLAP_WINDOW - 1] if _down(s))
+downs_prev  = sum(1 for s in recent[:FLAP_WINDOW] if _down(s))
+is_unstable = (_down(cur) and not down_alert
+               and downs_now >= FLAP_DOWNS and downs_prev < FLAP_DOWNS)
+
+if not (down_alert or is_unstable or is_recovery):
+    print(f'알림 대상 아님(cur={cur}, prev={prev}, streak={streak}, prev_streak={prev_streak}, '
+          f'thr={THRESHOLD}, downs={downs_now}/{FLAP_WINDOW}) — 스킵')
     sys.exit(0)
 
 try:
@@ -134,6 +151,17 @@ if is_unknown:
     body   = ('테스트가 완주하지 못해 결과 파일이 생성되지 않았습니다.\n'
               '(브라우저 크래시 / 전체 타임아웃 / 의존성 설치 실패 가능성)\n'
               '이번 런에서는 *사이트 상태가 확인되지 않았습니다* — 실행 로그를 확인해주세요.')
+elif is_unstable:
+    header = '🟠 이지랩 헬스체크 *간헐 장애 (불안정)*'
+    color  = '#d29922'
+    lines  = [f'최근 {FLAP_WINDOW}런 중 *{downs_now}회* 실패 — 연속은 아니지만 반복되고 있습니다.',
+              f'이번 런: *FAIL {fail_c}* · WARN {warn_c} · PASS {pass_c}']
+    for i, fr in enumerate(fail_only[:5], 1):
+        st  = fr.get('status', 0)
+        st_txt = 'timeout' if not st else str(st)
+        lines.append(f"{i}. [{fr.get('type','-')}/{fr.get('lang','-')}] `{st_txt}` {fr.get('url','-')}  — {fr.get('symptom','-')}")
+    lines.append('간헐 장애는 이 알림 1회만 발송됩니다 — 추이는 대시보드를 확인해주세요.')
+    body = '\n'.join(lines)
 elif is_fail:
     header = '🚨 이지랩 헬스체크 *장애 감지*' if is_new_fail else '🚨 이지랩 헬스체크 *장애 지속 중*'
     color  = '#e5534b'
@@ -161,4 +189,8 @@ payload = {
     }]
 }
 
-post(payload, '실행실패' if is_unknown else ('신규장애' if is_new_fail else ('장애지속' if is_fail else '복구')))
+label = ('실행실패' if is_unknown else
+         '간헐불안정' if is_unstable else
+         '신규장애' if is_new_fail else
+         '장애지속' if is_fail else '복구')
+post(payload, label)

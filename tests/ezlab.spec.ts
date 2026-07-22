@@ -1013,9 +1013,13 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   });
 
   // 인덱스 페이지 상태 배지용 파일 저장
+  // 최대 20건 보존 — WARN이 많은 런에서 FAIL이 잘려 Slack 장애 알림 목록이 비지 않도록 FAIL을 앞에 둔다.
   fs.writeFileSync('report-status.json', JSON.stringify({
     status, passCount, failCount, warnCount, slowCount, serverTimes,
-    failures: failRecords.slice(0, 20),  // 최대 20건 보존
+    failures: [
+      ...failRecords.filter(f => f.severity !== 'WARN'),
+      ...failRecords.filter(f => f.severity === 'WARN'),
+    ].slice(0, 20),
   }));
 
   console.log(`\n${'═'.repeat(60)}`);

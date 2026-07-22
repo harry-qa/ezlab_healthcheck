@@ -72,9 +72,26 @@ jobs:
           PREV_STATUS=$(python3 -c "import json; d=json.load(open('/tmp/statuses.json')); ks=sorted(d,reverse=True); print(d[ks[0]] if ks else 'NONE')" 2>/dev/null || echo "NONE")
           echo "PREV_STATUS=$PREV_STATUS" >> $GITHUB_ENV
 
-          # 최근 상태 이력 (현재 런 제외, 최신→과거 5개) → Slack 디바운스(단발 blip 억제)용
-          RECENT_STATUSES=$(python3 -c "import json; d=json.load(open('/tmp/statuses.json')); ks=sorted(d,reverse=True)[:5]; print(','.join(d[k] for k in ks))" 2>/dev/null || echo "")
+          # 최근 상태 이력 (현재 런 제외, 최신→과거 10개) → Slack 디바운스(단발 blip 억제)·불안정(flapping) 판정용
+          RECENT_STATUSES=$(python3 -c "import json; d=json.load(open('/tmp/statuses.json')); ks=sorted(d,reverse=True)[:10]; print(','.join(d[k] for k in ks))" 2>/dev/null || echo "")
           echo "RECENT_STATUSES=$RECENT_STATUSES" >> $GITHUB_ENV
+
+          # 현재 런 포함 연속 다운(FAIL/UNKNOWN) 스트릭 → 이슈 생성 디바운스용 (Slack의 FAIL_ALERT_THRESHOLD=2와 동일 기준)
+          FAIL_STREAK=$(python3 - "$CURRENT_STATUS" <<'PYEOF' 2>/dev/null || echo 0
+          import json, sys
+          cur = sys.argv[1]
+          down = lambda s: s in ('FAIL', 'UNKNOWN')
+          streak = 0
+          if down(cur):
+              streak = 1
+              d = json.load(open('/tmp/statuses.json'))
+              for k in sorted(d, reverse=True):
+                  if down(d[k]): streak += 1
+                  else: break
+          print(streak)
+          PYEOF
+          )
+          echo "FAIL_STREAK=$FAIL_STREAK" >> $GITHUB_ENV
 
           python3 scripts/update_statuses.py "$DATETIME" "$CURRENT_STATUS"
           python3 scripts/update_perf.py "$DATETIME"
@@ -113,7 +130,9 @@ jobs:
         run: python3 scripts/notify_slack.py
 
       - name: 실패 알림 (GitHub Issue 자동 생성)
-        if: env.HEALTH_STATUS == 'FAIL'
+        # Slack과 동일하게 연속 2런(FAIL_STREAK >= 2)부터 생성 — 단발 blip이 이슈/코멘트 스팸을 만들지 않도록.
+        # (기준값 2는 notify_slack.py의 FAIL_ALERT_THRESHOLD 기본값과 맞춰야 함)
+        if: env.HEALTH_STATUS == 'FAIL' && env.FAIL_STREAK >= 2
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPORT_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
