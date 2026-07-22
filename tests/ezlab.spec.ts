@@ -111,6 +111,32 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   let slowCount = 0; // 느린 응답(정보성) — 런 상태(WARN)·헬스 스코어엔 반영 안 함
   const serverTimes: Record<string, number> = {};
 
+  // ── 네비게이션 재시도 헬퍼 (간헐 오리진 404/5xx/타임아웃 오탐 방지) ──────────────
+  // tool·login 페이지는 CloudFront 캐시 미적용(cache-control: no-store)이라 매 요청이
+  // 오리진(nginx+SSR) 직격 → 순간 부하 시 데이터 페치가 타임아웃돼 간헐 404를 뱉는다.
+  // (정상 200은 TTFB 0.2s대, 실패 404는 10s대로 관측됨.) 404 한 번에 즉시 FAIL 처리하면
+  // 오탐이므로, 짧은 백오프로 재확인해 실제 장애(재시도해도 실패)와 간헐(회복)을 구분한다.
+  // 반환: { status, responseTime, attempts, recovered } — recovered는 2회차 이후 회복 여부.
+  async function gotoWithRetry(url: string, maxAttempts = 3) {
+    let lastStatus = 0;
+    let lastResponseTime = 0;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const startTime = Date.now();
+        const res = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        lastResponseTime = Date.now() - startTime;
+        lastStatus = res?.status() ?? 0;
+        if (lastStatus === 200) {
+          return { status: 200, responseTime: lastResponseTime, attempts: attempt, recovered: attempt > 1 };
+        }
+      } catch {
+        lastStatus = 0; // 타임아웃/접속 불가
+      }
+      if (attempt < maxAttempts) await page.waitForTimeout(1500 * attempt); // 1.5s → 3s 백오프 (오리진 회복 대기)
+    }
+    return { status: lastStatus, responseTime: lastResponseTime, attempts: maxAttempts, recovered: false };
+  }
+
   async function checkUrl(type: string, lang: string, url: string, isInternal: boolean = true) {
     const cleanUrl = url.split('?')[0];
     if (visitedUrls.has(cleanUrl)) return;
@@ -122,12 +148,28 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
     try {
       await page.waitForTimeout(Math.floor(Math.random() * 500) + 300);
 
-      const startTime = Date.now();
-      const res = await page.request.get(requestUrl, { headers, timeout: 8000 });
-      const responseTime = Date.now() - startTime;
+      // 내부 링크는 오리진 순간 지연(캐시 미적용 SSR 페이지의 간헐 타임아웃/5xx/404) 오탐을 막기 위해
+      // 짧은 백오프로 재확인한다. 외부 링크는 WARN이라 지연 누적 방지를 위해 1회만 요청.
+      const maxAttempts = isInternal ? 3 : 1;
+      let res!: Awaited<ReturnType<typeof page.request.get>>;
+      let responseTime = 0;
+      let attempts = 0;
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        attempts = attempt;
+        try {
+          const startTime = Date.now();
+          res = await page.request.get(requestUrl, { headers, timeout: 8000 });
+          responseTime = Date.now() - startTime;
+          if (res.status() === 200 || attempt >= maxAttempts) break; // 성공 또는 마지막 시도 → 아래에서 판정
+        } catch (e) {
+          if (attempt >= maxAttempts) throw e; // 마지막 시도까지 실패 → 바깥 catch(접속 불가)로
+        }
+        await page.waitForTimeout(1500 * attempt); // 1.5s → 3s 백오프 (오리진 회복 대기)
+      }
 
       const status = res.status();
       const finalUrl = res.url();
+      const recovered = attempts > 1 && status === 200; // 재시도로 회복된 간헐 케이스
       // 요청한 URL(외부 링크는 쿼리 포함 원본)과 비교 — cleanUrl과 비교하면 쿼리가 있는
       // 외부 링크가 리다이렉트 없이도 전부 [REDIRECT]로 오표기된다.
       const isRedirect = finalUrl !== requestUrl;
@@ -149,6 +191,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
       if (isRedirect)   notes.push(`리다이렉트 → ${finalUrl}`);
       if (contentIssue) notes.push(contentIssue);
       if (isSlow)       notes.push(`응답 느림: ${responseTime}ms`);
+      if (recovered)    notes.push(`간헐 회복 (${attempts}회 시도)`);
       if (!isInternal)  notes.push('외부 링크');
       const noteStr = notes.join(' | ') || '정상';
 
@@ -454,11 +497,18 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
         const tlang = target.url.match(/\/(ko|en|jp|tw)\//)?.[1] ?? 'ko'; // URL에서 언어 추출 (ko 고정 제거)
         try {
           visitedUrls.add(target.url); // 최종 집계에 포함
-          const startTime = Date.now();
-          // page.goto 하나로 status 확인 + DOM 접근 동시에 (이중 요청 제거)
-          const res = await page.goto(target.url, { waitUntil: 'domcontentloaded', timeout: 15000 });
-          const responseTime = Date.now() - startTime;
-          const status = res?.status() ?? 0;
+          // 간헐 오리진 404/타임아웃 오탐 방지: 실패 시 짧은 백오프로 재확인 후 판정
+          const nav = await gotoWithRetry(target.url);
+          const responseTime = nav.responseTime;
+          const status = nav.status;
+
+          // 재시도로 회복된 항목(간헐)은 진짜 장애와 분리해 WARN(간헐)으로 기록 — 페이지는 살아있음
+          if (status === 200 && nav.recovered) {
+            warnCount++;
+            const ts = kstNow();
+            console.log(`[WARN][다운로드][${target.name}] 간헐 실패 후 ${nav.attempts}회차 회복 (${responseTime}ms) ${target.url} @ ${ts}`);
+            failRecords.push({ step: 'STEP4·다운로드', type: '다운로드', lang: tlang, url: target.url, status, responseTime, symptom: `간헐 실패 후 회복 (${nav.attempts}회 시도)`, timestamp: ts });
+          }
 
           let hasDownloadLink = false;
           if (status === 200) {
@@ -473,9 +523,12 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
           if (status !== 200) {
             failCount++;
             const ts = kstNow();
-            console.log(`[FAIL][다운로드][${target.name}] ${status} (${responseTime}ms) ${target.url} @ ${ts}`);
-            failRecords.push({ step: 'STEP4·다운로드', type: '다운로드', lang: tlang, url: target.url, status, responseTime, symptom: `HTTP ${status} 응답`, timestamp: ts });
-            expect.soft(status, `[다운로드][${target.name}] 페이지 응답 실패 → ${target.url}`).toBe(200);
+            const symptom = status === 0
+              ? `접속 불가 / 타임아웃 (${nav.attempts}회 재시도 실패)`
+              : `HTTP ${status} 응답 (${nav.attempts}회 재시도 실패)`;
+            console.log(`[FAIL][다운로드][${target.name}] ${status} (${responseTime}ms, ${nav.attempts}회 시도) ${target.url} @ ${ts}`);
+            failRecords.push({ step: 'STEP4·다운로드', type: '다운로드', lang: tlang, url: target.url, status, responseTime, symptom, timestamp: ts });
+            expect.soft(status, `[다운로드][${target.name}] 페이지 응답 실패(${nav.attempts}회 재시도) → ${target.url}`).toBe(200);
           } else if (!hasDownloadLink) {
             warnCount++;
             const ssWarn = await page.screenshot({ fullPage: false });
@@ -510,11 +563,13 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
             }
           }
         } catch (e) {
+          // 접속 불가/타임아웃은 gotoWithRetry가 status 0으로 위에서 처리 —
+          // 여기는 DOM/파일 검증 중 발생한 예외만 잡는다.
           failCount++;
           const ts = kstNow();
-          console.log(`[ERROR][다운로드][${target.name}] 접속 불가: ${target.url} @ ${ts}`);
-          failRecords.push({ step: 'STEP4·다운로드', type: '다운로드', lang: tlang, url: target.url, status: 0, responseTime: 0, symptom: '접속 불가 / 타임아웃', timestamp: ts });
-          expect.soft(null, `[다운로드][${target.name}] 접속 불가/타임아웃 → ${target.url}`).not.toBeNull();
+          console.log(`[ERROR][다운로드][${target.name}] 검증 중 예외: ${target.url} @ ${ts}`);
+          failRecords.push({ step: 'STEP4·다운로드', type: '다운로드', lang: tlang, url: target.url, status: 0, responseTime: 0, symptom: '검증 중 예외', timestamp: ts });
+          expect.soft(null, `[다운로드][${target.name}] 검증 중 예외 → ${target.url}`).not.toBeNull();
         }
       });
     }
@@ -627,12 +682,30 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
       await test.step(`[로그인][${lang}] 버튼 존재 확인`, async () => {
         const loginUrl = `${baseUrl}/${lang}/login`;
         try {
-          await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+          const nav = await gotoWithRetry(loginUrl); // 간헐 오리진 실패 재확인
+          // gotoWithRetry는 예외를 삼키고 status를 반환하므로, 페이지가 안 뜬 경우(404/타임아웃)를
+          // 여기서 명시적으로 FAIL 처리한다 — 안 그러면 버튼 미감지(WARN)로 격하돼 심각도가 어긋난다.
+          if (nav.status !== 200) {
+            failCount++;
+            const ts = kstNow();
+            console.log(`[ERROR][로그인][${lang}] 페이지 진입 실패: ${nav.status} (${nav.attempts}회 시도) ${loginUrl} @ ${ts}`);
+            failRecords.push({ step: 'STEP7·로그인폼', type: '로그인', lang, url: loginUrl, status: nav.status, responseTime: nav.responseTime, symptom: `페이지 진입 실패 (HTTP ${nav.status}, ${nav.attempts}회 재시도)`, timestamp: ts });
+            expect.soft(nav.status, `[로그인][${lang}] 페이지 진입 실패 → ${loginUrl}`).toBe(200);
+            return; // 페이지가 안 떴으면 버튼 검사 무의미
+          }
 
           const missing: string[] = [];
           for (const btn of buttons) {
-            const count = await page.locator(`button:has-text("${btn}"), a:has-text("${btn}")`).count();
-            if (count === 0) missing.push(btn);
+            // 버튼이 <button>/<a>가 아니라 [role=button]·btn-class <div>로 렌더되거나,
+            // 하이드레이션 직후 SSR 콘텐츠가 잠깐 스켈레톤으로 교체되는 타이밍 오탐을 막기 위해
+            // 셀렉터를 넓히고 최대 4초까지 등장을 대기한 뒤 판정한다.
+            const escaped = btn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const loc = page.locator('button, a, [role="button"], [class*="btn" i]')
+              .filter({ hasText: new RegExp(escaped, 'i') });
+            try {
+              await loc.first().waitFor({ state: 'visible', timeout: 4000 });
+            } catch { /* 최종 판정은 아래 count로 */ }
+            if (await loc.count() === 0) missing.push(btn);
           }
 
           if (missing.length > 0) {
