@@ -1,0 +1,1 @@
+{"status":"FAIL","passCount":207,"failCount":1,"warnCount":0,"slowCount":0,"serverTimes":{"ko":583,"en":560,"jp":579,"tw":211},"failures":[{"step":"STEP8·이지다운","type":"이지다운","lang":"jp","url":"https://ezdown.kr/jp/","status":0,"responseTime":0,"symptom":"접속 불가 / 타임아웃","timestamp":"2026. 7. 22. 10시 22분 15초"}]}
