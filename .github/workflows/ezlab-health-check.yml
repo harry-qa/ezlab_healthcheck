@@ -72,6 +72,10 @@ jobs:
           PREV_STATUS=$(python3 -c "import json; d=json.load(open('/tmp/statuses.json')); ks=sorted(d,reverse=True); print(d[ks[0]] if ks else 'NONE')" 2>/dev/null || echo "NONE")
           echo "PREV_STATUS=$PREV_STATUS" >> $GITHUB_ENV
 
+          # 최근 상태 이력 (현재 런 제외, 최신→과거 5개) → Slack 디바운스(단발 blip 억제)용
+          RECENT_STATUSES=$(python3 -c "import json; d=json.load(open('/tmp/statuses.json')); ks=sorted(d,reverse=True)[:5]; print(','.join(d[k] for k in ks))" 2>/dev/null || echo "")
+          echo "RECENT_STATUSES=$RECENT_STATUSES" >> $GITHUB_ENV
+
           python3 scripts/update_statuses.py "$DATETIME" "$CURRENT_STATUS"
           python3 scripts/update_perf.py "$DATETIME"
           python3 scripts/update_failures.py "$DATETIME"

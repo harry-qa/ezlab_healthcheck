@@ -52,12 +52,14 @@ function checkCertExpiry(
 }
 
 test.afterEach(async ({ page }, testInfo) => {
+  // STEP 전체가 하나의 test라 여기서 찍히는 건 '실패 스텝'이 아니라 런 종료 시점의 마지막 화면이다.
+  // 실제 실패 순간 화면은 각 STEP에서 captureShot()으로 별도 저장하므로, 여기선 참고용 종료 상태만 남긴다.
   if (testInfo.status !== testInfo.expectedStatus) {
     const ts = Date.now();
     const safeTitle = testInfo.title.replace(/[^a-zA-Z0-9가-힣]/g, '_').slice(0, 50);
-    const filePath = path.join(SCREENSHOT_DIR, `fail-${safeTitle}-${ts}.png`);
+    const filePath = path.join(SCREENSHOT_DIR, `run-end-state-${safeTitle}-${ts}.png`);
     await page.screenshot({ path: filePath, fullPage: true });
-    console.log(`[SCREENSHOT] afterEach 실패 스크린샷: ${filePath}`);
+    console.log(`[SCREENSHOT] 런 종료 시점 화면(참고용): ${filePath}`);
   }
 });
 
@@ -91,7 +93,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   };
 
   type ApiRecord  = { url: string; method: string; status: number; time: number; note: string };
-  type FailRecord = { step: string; type: string; lang: string; url: string; status: number; responseTime: number; symptom: string; timestamp: string };
+  // severity 미지정(undefined)은 FAIL로 간주 — WARN 성격의 기록에만 'WARN'을 명시한다.
+  // (Slack 장애 알림이 WARN 항목을 섞어 나열하던 문제 해결: report-status.json 소비 측에서 필터)
+  type FailRecord = { step: string; type: string; lang: string; url: string; status: number; responseTime: number; symptom: string; timestamp: string; severity?: 'FAIL' | 'WARN' };
 
   const apiRecords: ApiRecord[]  = [];
   const failRecords: FailRecord[] = [];
@@ -135,6 +139,24 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
       if (attempt < maxAttempts) await page.waitForTimeout(1500 * attempt); // 1.5s → 3s 백오프 (오리진 회복 대기)
     }
     return { status: lastStatus, responseTime: lastResponseTime, attempts: maxAttempts, recovered: false };
+  }
+
+  // ── 실패 시점 스크린샷 헬퍼 ────────────────────────────────────────
+  // 기존엔 test.info().attach()만 써서 playwright-report에는 남지만 워크플로가 아티팩트로 올리는
+  // test-results/screenshots/ 폴더엔 안 들어갔다(경로 불일치). 또 STEP은 전부 한 test라
+  // afterEach 스크린샷은 '실패 스텝'이 아니라 런 종료 시점 마지막 화면만 찍혀 쓸모가 적었다.
+  // → 실패가 난 그 자리에서 SCREENSHOT_DIR에 저장(아티팩트 반영) + 리포트에도 첨부한다.
+  async function captureShot(label: string) {
+    const safe = label.replace(/[^a-zA-Z0-9가-힣]/g, '_').slice(0, 60);
+    const filePath = path.join(SCREENSHOT_DIR, `${safe}-${Date.now()}.png`);
+    try {
+      const buf = await page.screenshot({ path: filePath, fullPage: true });
+      await test.info().attach(label, { body: buf, contentType: 'image/png' });
+      console.log(`[SCREENSHOT] ${label} → ${filePath}`);
+    } catch (e) {
+      console.log(`[SCREENSHOT] 캡처 실패(${label}): ${(e as Error).message}`);
+    }
+    return filePath;
   }
 
   async function checkUrl(type: string, lang: string, url: string, isInternal: boolean = true) {
@@ -507,7 +529,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
             warnCount++;
             const ts = kstNow();
             console.log(`[WARN][다운로드][${target.name}] 간헐 실패 후 ${nav.attempts}회차 회복 (${responseTime}ms) ${target.url} @ ${ts}`);
-            failRecords.push({ step: 'STEP4·다운로드', type: '다운로드', lang: tlang, url: target.url, status, responseTime, symptom: `간헐 실패 후 회복 (${nav.attempts}회 시도)`, timestamp: ts });
+            failRecords.push({ step: 'STEP4·다운로드', type: '다운로드', lang: tlang, url: target.url, status, responseTime, symptom: `간헐 실패 후 회복 (${nav.attempts}회 시도)`, timestamp: ts, severity: 'WARN' });
           }
 
           let hasDownloadLink = false;
@@ -527,12 +549,12 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
               ? `접속 불가 / 타임아웃 (${nav.attempts}회 재시도 실패)`
               : `HTTP ${status} 응답 (${nav.attempts}회 재시도 실패)`;
             console.log(`[FAIL][다운로드][${target.name}] ${status} (${responseTime}ms, ${nav.attempts}회 시도) ${target.url} @ ${ts}`);
+            await captureShot(`실패_다운로드_${target.name}_${tlang}`); // 실제 장애 순간 화면 보존
             failRecords.push({ step: 'STEP4·다운로드', type: '다운로드', lang: tlang, url: target.url, status, responseTime, symptom, timestamp: ts });
             expect.soft(status, `[다운로드][${target.name}] 페이지 응답 실패(${nav.attempts}회 재시도) → ${target.url}`).toBe(200);
           } else if (!hasDownloadLink) {
             warnCount++;
-            const ssWarn = await page.screenshot({ fullPage: false });
-            await test.info().attach(`스크린샷_다운로드_${target.name}`, { body: ssWarn, contentType: 'image/png' });
+            await captureShot(`경고_다운로드버튼미감지_${target.name}`);
             console.log(`[WARN][다운로드][${target.name}] 페이지 정상이나 다운로드 버튼 미감지 ${target.url}`);
           } else {
             passCount++;
@@ -554,7 +576,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
                   warnCount++;
                   const ts = kstNow();
                   console.log(`[WARN][파일][${target.name}] ${fileStatus} 파일 응답 이상 ${fileUrl}`);
-                  failRecords.push({ step: 'STEP4·파일URL', type: '파일', lang: tlang, url: fileUrl, status: fileStatus, responseTime: 0, symptom: `파일 응답 이상 (${fileStatus})`, timestamp: ts });
+                  failRecords.push({ step: 'STEP4·파일URL', type: '파일', lang: tlang, url: fileUrl, status: fileStatus, responseTime: 0, symptom: `파일 응답 이상 (${fileStatus})`, timestamp: ts, severity: 'WARN' });
                 }
               } catch {
                 warnCount++;
@@ -597,8 +619,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
           if (missingKeywords.length > 0) {
             failCount++;
             const ts = kstNow();
-            const ssContent = await page.screenshot({ fullPage: false });
-            await test.info().attach(`스크린샷_콘텐츠_${lang}`, { body: ssContent, contentType: 'image/png' });
+            await captureShot(`실패_콘텐츠_${lang}`);
             const msg = `[콘텐츠][${lang}] 누락 키워드: ${missingKeywords.join(', ')}`;
             console.log(`[FAIL] ${msg} @ ${ts}`);
             failRecords.push({ step: 'STEP5·콘텐츠', type: '콘텐츠', lang, url: targetUrl, status: 200, responseTime: 0, symptom: `누락 키워드: ${missingKeywords.join(', ')}`, timestamp: ts });
@@ -651,7 +672,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
               warnCount++;
               const ts = kstNow();
               console.log(`[WARN][이미지][${lang}] ${imgStatus} 깨진 이미지: ${cleanSrc}`);
-              failRecords.push({ step: 'STEP6·이미지', type: '이미지', lang, url: cleanSrc, status: imgStatus, responseTime: 0, symptom: `이미지 로드 실패 (${imgStatus})`, timestamp: ts });
+              failRecords.push({ step: 'STEP6·이미지', type: '이미지', lang, url: cleanSrc, status: imgStatus, responseTime: 0, symptom: `이미지 로드 실패 (${imgStatus})`, timestamp: ts, severity: 'WARN' });
             } else {
               passCount++;
               console.log(`[PASS][이미지][${lang}] ${imgStatus} ${cleanSrc}`);
@@ -710,11 +731,10 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
 
           if (missing.length > 0) {
             warnCount++;
-            const ssLogin = await page.screenshot({ fullPage: false });
-            await test.info().attach(`스크린샷_로그인폼_${lang}`, { body: ssLogin, contentType: 'image/png' });
+            await captureShot(`경고_로그인버튼미감지_${lang}`);
             const ts = kstNow();
             console.log(`[WARN][로그인][${lang}] 버튼 미감지: ${missing.join(', ')} @ ${ts}`);
-            failRecords.push({ step: 'STEP7·로그인폼', type: '로그인', lang, url: loginUrl, status: 200, responseTime: 0, symptom: `버튼 미감지: ${missing.join(', ')}`, timestamp: ts });
+            failRecords.push({ step: 'STEP7·로그인폼', type: '로그인', lang, url: loginUrl, status: 200, responseTime: 0, symptom: `버튼 미감지: ${missing.join(', ')}`, timestamp: ts, severity: 'WARN' });
           } else {
             passCount++;
             console.log(`[PASS][로그인][${lang}] 버튼 모두 확인: ${buttons.join(', ')}`);
@@ -779,8 +799,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
           if (missing.length > 0) {
             failCount++;
             const ts = kstNow();
-            const ssC = await page.screenshot({ fullPage: false });
-            await test.info().attach(`스크린샷_이지다운_콘텐츠_${lang}`, { body: ssC, contentType: 'image/png' });
+            await captureShot(`실패_이지다운콘텐츠_${lang}`);
             console.log(`[FAIL][이지다운][${lang}] 누락 키워드: ${missing.join(', ')} @ ${ts}`);
             failRecords.push({ step: 'STEP8·이지다운', type: '이지다운', lang, url, status: 200, responseTime: 0, symptom: `누락 키워드: ${missing.join(', ')}`, timestamp: ts });
             expect.soft(missing.length, `[이지다운][${lang}] 콘텐츠 누락: ${missing.join(', ')}`).toBe(0);
@@ -804,7 +823,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
                 warnCount++;
                 const ts = kstNow();
                 console.log(`[WARN][이지다운][이미지][${lang}] ${ir.status()} ${cleanSrc}`);
-                failRecords.push({ step: 'STEP8·이지다운이미지', type: '이미지', lang, url: cleanSrc, status: ir.status(), responseTime: 0, symptom: `이미지 로드 실패 (${ir.status()})`, timestamp: ts });
+                failRecords.push({ step: 'STEP8·이지다운이미지', type: '이미지', lang, url: cleanSrc, status: ir.status(), responseTime: 0, symptom: `이미지 로드 실패 (${ir.status()})`, timestamp: ts, severity: 'WARN' });
               }
             } catch {
               warnCount++;
@@ -850,7 +869,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
             const ts = kstNow();
             const symptom = `SSL 인증서 만료 임박 D-${daysLeft} (만료일 ${validTo})`;
             console.log(`[WARN][인증서][${host}] ${symptom}`);
-            failRecords.push({ step: 'STEP9·인증서', type: '인증서', lang: '-', url: `https://${host}`, status: 0, responseTime: 0, symptom, timestamp: ts });
+            failRecords.push({ step: 'STEP9·인증서', type: '인증서', lang: '-', url: `https://${host}`, status: 0, responseTime: 0, symptom, timestamp: ts, severity: 'WARN' });
           } else {
             passCount++;
             console.log(`[PASS][인증서][${host}] 만료까지 D-${daysLeft} (만료일 ${validTo})`);
@@ -861,7 +880,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
           const ts = kstNow();
           const msg = (e as Error).message || '확인 실패';
           console.log(`[WARN][인증서][${host}] 확인 실패: ${msg} @ ${ts}`);
-          failRecords.push({ step: 'STEP9·인증서', type: '인증서', lang: '-', url: `https://${host}`, status: 0, responseTime: 0, symptom: `인증서 확인 실패: ${msg}`, timestamp: ts });
+          failRecords.push({ step: 'STEP9·인증서', type: '인증서', lang: '-', url: `https://${host}`, status: 0, responseTime: 0, symptom: `인증서 확인 실패: ${msg}`, timestamp: ts, severity: 'WARN' });
         }
       });
     }

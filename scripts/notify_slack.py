@@ -69,13 +69,46 @@ else:
 run_url   = os.environ.get('RUN_URL', '')
 pages_url = os.environ.get('PAGES_URL', '')
 
+# 최근 상태 이력(현재 런 제외, 최신→과거) — 단발 blip 억제(디바운스)에 사용.
+recent = [s for s in os.environ.get('RECENT_STATUSES', '').split(',') if s]
+if not recent and prev not in ('', 'NONE'):
+    recent = [prev]  # 폴백: RECENT 미전달 시 직전 상태만이라도 사용
+# FAIL은 연속 N런부터 알림(단발 오탐 억제). UNKNOWN은 즉시 알림(헬스체크 자체 이상이라 방치 위험).
+THRESHOLD = max(1, int(os.environ.get('FAIL_ALERT_THRESHOLD', '2')))
+
+
+def _down(s):
+    return s in ('FAIL', 'UNKNOWN')
+
+
+# 현재까지 이어진 실패 스트릭 길이(현재 런 포함)
+streak = 0
+if _down(cur):
+    streak = 1
+    for s in recent:
+        if _down(s):
+            streak += 1
+        else:
+            break
+# 현재 직전까지 이어졌던 실패 스트릭 길이 — 복구 알림을 낼지(=직전 장애가 실제 알림됐는지) 판단용
+prev_streak = 0
+for s in recent:
+    if _down(s):
+        prev_streak += 1
+    else:
+        break
+
 is_fail     = cur == 'FAIL'
-is_unknown  = cur == 'UNKNOWN'                # 테스트 미완주 — 헬스체크 자체 이상
-is_new_fail = is_fail and prev != 'FAIL'      # PASS/WARN → FAIL (장애 시작)
-is_recovery = cur in ('PASS', 'WARN') and prev in ('FAIL', 'UNKNOWN')  # 장애/실행실패 → 정상 (복구)
-# FAIL/UNKNOWN인 동안에는 매 런 재알림(놓침·유실 방지). 복구는 전환 시 1회.
-if not (is_fail or is_unknown or is_recovery):
-    print(f'알림 대상 아님(cur={cur}, prev={prev}) — 스킵')
+is_unknown  = cur == 'UNKNOWN'                       # 테스트 미완주 — 헬스체크 자체 이상
+# UNKNOWN은 1회부터, FAIL은 THRESHOLD 연속부터 알림
+down_alert  = is_unknown or (is_fail and streak >= THRESHOLD)
+is_new_fail = is_fail and streak == THRESHOLD        # 임계 도달 첫 알림 = '장애 감지', 이후 = '지속 중'
+# 복구: 정상 전환 && 직전 장애가 '실제로 알림된' 수준이었을 때만 — 단발 blip 자동회복은 침묵.
+prev_alerted = prev_streak >= THRESHOLD or (bool(recent) and recent[0] == 'UNKNOWN')
+is_recovery  = cur in ('PASS', 'WARN') and _down(prev) and prev_alerted
+
+if not (down_alert or is_recovery):
+    print(f'알림 대상 아님(cur={cur}, prev={prev}, streak={streak}, prev_streak={prev_streak}, thr={THRESHOLD}) — 스킵')
     sys.exit(0)
 
 try:
@@ -87,6 +120,8 @@ fail_c   = data.get('failCount', 0)
 warn_c   = data.get('warnCount', 0)
 pass_c   = data.get('passCount', 0)
 failures = data.get('failures', []) or []
+# report-status.json 의 failures 는 FAIL+WARN 혼합 기록 — 장애 알림엔 실제 FAIL(severity!='WARN')만 나열.
+fail_only = [f for f in failures if f.get('severity') != 'WARN']
 
 links = []
 if pages_url: links.append(f'<{pages_url}|📊 대시보드>')
@@ -102,14 +137,14 @@ if is_unknown:
 elif is_fail:
     header = '🚨 이지랩 헬스체크 *장애 감지*' if is_new_fail else '🚨 이지랩 헬스체크 *장애 지속 중*'
     color  = '#e5534b'
-    types  = ', '.join(sorted({f.get('type', '-') for f in failures})) or '-'
+    types  = ', '.join(sorted({f.get('type', '-') for f in fail_only})) or '-'
     lines  = [f'*FAIL {fail_c}* · WARN {warn_c} · PASS {pass_c}', f'영향 범위: *{types}*']
-    for i, fr in enumerate(failures[:5], 1):
+    for i, fr in enumerate(fail_only[:5], 1):
         st  = fr.get('status', 0)
         st_txt = 'timeout' if not st else str(st)
         lines.append(f"{i}. [{fr.get('type','-')}/{fr.get('lang','-')}] `{st_txt}` {fr.get('url','-')}  — {fr.get('symptom','-')}")
-    if len(failures) > 5:
-        lines.append(f'…외 {len(failures) - 5}건')
+    if len(fail_only) > 5:
+        lines.append(f'…외 {len(fail_only) - 5}건')
     body = '\n'.join(lines)
 else:  # recovery
     header = '✅ 이지랩 헬스체크 *복구됨*'
