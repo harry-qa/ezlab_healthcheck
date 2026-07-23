@@ -113,6 +113,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   let failCount = 0;
   let warnCount = 0;
   let slowCount = 0; // 느린 응답(정보성) — 런 상태(WARN)·헬스 스코어엔 반영 안 함
+  let shotCount = 0; // 이번 런에서 실제 캡처·첨부된 화면 수 — 리포트 안내 문구를 조건부로 내기 위함
   const serverTimes: Record<string, number> = {};
 
   // ── 네비게이션 재시도 헬퍼 (간헐 오리진 404/5xx/타임아웃 오탐 방지) ──────────────
@@ -152,6 +153,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
     try {
       const buf = await page.screenshot({ path: filePath, fullPage: true });
       await test.info().attach(label, { body: buf, contentType: 'image/png' });
+      shotCount++;
       console.log(`[SCREENSHOT] ${label} → ${filePath}`);
     } catch (e) {
       console.log(`[SCREENSHOT] 캡처 실패(${label}): ${(e as Error).message}`);
@@ -562,6 +564,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
 
             // 실제 파일 URL HEAD 요청으로 파일 존재 확인
             const fileLinks = await page.locator('a[href*=".exe"], a[href*=".apk"], a[href*=".zip"]').all();
+            let fileShotDone = false; // 파일 여러 개여도 다운로드 페이지 화면은 1장만
             for (const link of fileLinks) {
               const href = await link.getAttribute('href');
               if (!href) continue;
@@ -577,6 +580,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
                   const ts = kstNow();
                   console.log(`[WARN][파일][${target.name}] ${fileStatus} 파일 응답 이상 ${fileUrl}`);
                   failRecords.push({ step: 'STEP4·파일URL', type: '파일', lang: tlang, url: fileUrl, status: fileStatus, responseTime: 0, symptom: `파일 응답 이상 (${fileStatus})`, timestamp: ts, severity: 'WARN' });
+                  if (!fileShotDone) { await captureShot(`경고_파일응답이상_${target.name}`); fileShotDone = true; }
                 }
               } catch {
                 warnCount++;
@@ -655,6 +659,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
 
         const images = await page.locator('img').all();
         console.log(`[INFO][${lang}] 총 ${images.length}개 이미지 발견`);
+        let imgShotDone = false; // 깨진 이미지가 여러 개여도 페이지 화면은 1장만 남긴다
 
         for (const img of images) {
           const src = await img.getAttribute('src');
@@ -673,6 +678,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
               const ts = kstNow();
               console.log(`[WARN][이미지][${lang}] ${imgStatus} 깨진 이미지: ${cleanSrc}`);
               failRecords.push({ step: 'STEP6·이미지', type: '이미지', lang, url: cleanSrc, status: imgStatus, responseTime: 0, symptom: `이미지 로드 실패 (${imgStatus})`, timestamp: ts, severity: 'WARN' });
+              if (!imgShotDone) { await captureShot(`경고_깨진이미지_${lang}`); imgShotDone = true; }
             } else {
               passCount++;
               console.log(`[PASS][이미지][${lang}] ${imgStatus} ${cleanSrc}`);
@@ -810,6 +816,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
 
           // 3) 깨진 이미지 — DOM(lazy-load) 대신 URL fetch 상태로 판별
           const imgs = await page.locator('img').all();
+          let ezdownImgShotDone = false; // 페이지당 화면 1장만
           for (const img of imgs) {
             const src = await img.getAttribute('src');
             if (!src || src.startsWith('data:') || src.startsWith('blob:') || src.includes('/_next/image')) continue;
@@ -824,6 +831,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
                 const ts = kstNow();
                 console.log(`[WARN][이지다운][이미지][${lang}] ${ir.status()} ${cleanSrc}`);
                 failRecords.push({ step: 'STEP8·이지다운이미지', type: '이미지', lang, url: cleanSrc, status: ir.status(), responseTime: 0, symptom: `이미지 로드 실패 (${ir.status()})`, timestamp: ts, severity: 'WARN' });
+                if (!ezdownImgShotDone) { await captureShot(`경고_이지다운깨진이미지_${lang}`); ezdownImgShotDone = true; }
               }
             } catch {
               warnCount++;
@@ -989,7 +997,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
       '',
       sep2,
       `전체 결과  : PASS ${passCount} / FAIL ${failCount} / WARN ${warnCount} / SLOW ${slowCount} / TOTAL ${totalCount}`,
-      '※ 스크린샷은 리포트 첨부 파일에서 확인하세요.',
+      shotCount > 0
+        ? `※ 실패/경고 시점 화면 ${shotCount}건이 이 리포트 첨부 파일에 있습니다.`
+        : '※ 이번 런은 캡처된 화면이 없습니다 (인증서·외부링크 등 열린 페이지가 없는 네트워크성 경고).',
       sep,
     ].join('\n');
 
