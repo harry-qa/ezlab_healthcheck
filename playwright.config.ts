@@ -13,14 +13,13 @@ import { defineConfig, devices } from '@playwright/test';
  */
 export default defineConfig({
   testDir: './tests',
-  /* Run tests in files in parallel */
-  fullyParallel: true,
   /* Fail the build on CI if you accidentally left test.only in the source code. */
   forbidOnly: !!process.env.CI,
-  /* Retry on CI only */
-  retries: process.env.CI ? 1 : 0, // CI: 일시적 네트워크 오류 대응 1회 재시도
-  /* Opt out of parallel tests on CI. */
-  workers: process.env.CI ? 1 : undefined,
+  /* CI에서 1회 재시도 — 스텝 단위 재시도(gotoWithRetry 등)를 통과한 FAIL만 남기기 위한 마지막 방어선.
+     재시도 런이 report-status.json을 덮어쓰므로, 기록된 FAIL은 런 전체를 두 번 돌려도 실패한 것이다. */
+  retries: process.env.CI ? 1 : 0,
+  /* 헬스체크는 단일 test라 병렬 실행 여지가 없다 — 워커 1개로 고정(fullyParallel은 무의미해 제거). */
+  workers: 1,
   /* Reporter to use. See https://playwright.dev/docs/test-reporters */
   reporter: [['html', { open: process.env.CI ? 'never' : 'always' }]],
   /* Shared settings for all the projects below. See https://playwright.dev/docs/api/class-testoptions. */

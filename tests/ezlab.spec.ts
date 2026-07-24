@@ -51,17 +51,9 @@ function checkCertExpiry(
   });
 }
 
-test.afterEach(async ({ page }, testInfo) => {
-  // STEP 전체가 하나의 test라 여기서 찍히는 건 '실패 스텝'이 아니라 런 종료 시점의 마지막 화면이다.
-  // 실제 실패 순간 화면은 각 STEP에서 captureShot()으로 별도 저장하므로, 여기선 참고용 종료 상태만 남긴다.
-  if (testInfo.status !== testInfo.expectedStatus) {
-    const ts = Date.now();
-    const safeTitle = testInfo.title.replace(/[^a-zA-Z0-9가-힣]/g, '_').slice(0, 50);
-    const filePath = path.join(SCREENSHOT_DIR, `run-end-state-${safeTitle}-${ts}.png`);
-    await page.screenshot({ path: filePath, fullPage: true });
-    console.log(`[SCREENSHOT] 런 종료 시점 화면(참고용): ${filePath}`);
-  }
-});
+// (제거됨) afterEach 전체화면 캡처 — STEP이 전부 하나의 test라 '실패 스텝'이 아니라 런 종료 시점의
+// 마지막 화면만 찍혔다. 실패 순간 화면은 각 STEP의 captureShot()이 이미 남기므로 중복이고,
+// 원인 파악에 쓰이지 않으면서 아티팩트 용량만 차지해 걷어낸다.
 
 test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, request }) => {
   test.setTimeout(600000);
@@ -79,6 +71,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   const errorKeywords = ['점검중', '서비스 준비중'];
   const languages = ['ko', 'en', 'jp', 'tw'];
   const visitedUrls = new Set<string>();
+  // 이미지는 링크와 별도 집계 — 같은 Set에 넣으면 '페이지/링크 N개'에 이미지 수백 개가 섞여
+  // 점검 범위 수치가 실제 페이지 수를 뜻하지 않게 된다. (ezlab / ezdown 이미지 공통 사용)
+  const checkedImageUrls = new Set<string>();
 
   // ── 서비스 도구 페이지 (STEP 3 크롤링에서 자동 수집) ────────────
   const discoveredToolUrls = new Set<string>();
@@ -109,6 +104,26 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   const testStartTime = Date.now();
   const CRAWL_DEADLINE_MS = 7 * 60 * 1000; // STEP 3 크롤 시간 예산 (전체 10분 타임아웃 방어)
   const REPORT_SAFETY_MS  = 8.5 * 60 * 1000; // 이 시점을 넘기면 이후 반복 항목은 스킵 — 최종 리포트 저장 보장
+
+  // 전체 test 타임아웃(10분)에 걸리면 report-status.json이 아예 안 써지고 런이 UNKNOWN으로 잡혀
+  // Slack 알림까지 나간다 — 사이트는 멀쩡한데 헬스체크가 스스로 장애를 만드는 셈이다.
+  // 재시도가 붙은 STEP은 최악 실행 시간이 길어지므로, 반복 루프마다 남은 예산을 확인해 자진 종료한다.
+  const outOfBudget = () => Date.now() - testStartTime > REPORT_SAFETY_MS;
+
+  // ── 응답 시간 임계값 ────────────────────────────────────────────
+  // 관측 근거: 정상 응답은 TTFB 0.14~0.23s, 오리진 간헐 실패는 10.5s 뒤 404.
+  // 기존 요청 타임아웃 8s는 그 10.5s보다 짧아, '느린 응답'이 '접속 불가' FAIL로 둔갑했다.
+  // → 타임아웃을 12s로 올려 실패 지연을 끝까지 관측하고, 3~12s 구간은 SLOW(정보성)로 흡수한다.
+  const REQUEST_TIMEOUT_MS = 12000; // 이 이상 걸리면 응답 없음으로 간주 (FAIL)
+  const SLOW_MS            = 3000;  // 이 이상이면 SLOW — 정보성, 런 상태·스코어 미반영
+  const VERY_SLOW_MS       = 8000;  // 이 이상이면 SLOW 중에서도 별도 표기 (장애 전조 가시화용)
+
+  // 간헐 실패 후 재시도로 회복한 항목 — 1건은 정상 범위(오리진 순간 지연)로 보고 PASS 취급,
+  // 한 런에 이 개수 이상 몰리면 그때만 WARN으로 승격한다. (검사 대상이 20여 개라
+  //  건당 1%대 확률만으로도 '런 하나는 반드시 걸리는' 증폭이 생기는 걸 막기 위함)
+  const INTERMITTENT_WARN_THRESHOLD = 2;
+  const intermittentRecoveries: FailRecord[] = [];
+
   let passCount = 0;
   let failCount = 0;
   let warnCount = 0;
@@ -121,31 +136,66 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   // 오리진(nginx+SSR) 직격 → 순간 부하 시 데이터 페치가 타임아웃돼 간헐 404를 뱉는다.
   // (정상 200은 TTFB 0.2s대, 실패 404는 10s대로 관측됨.) 404 한 번에 즉시 FAIL 처리하면
   // 오탐이므로, 짧은 백오프로 재확인해 실제 장애(재시도해도 실패)와 간헐(회복)을 구분한다.
-  // 반환: { status, responseTime, attempts, recovered } — recovered는 2회차 이후 회복 여부.
+  // 반환: { status, responseTime, attempts, recovered, failureLog } — recovered는 2회차 이후 회복 여부.
+  // failureLog에는 실패한 각 시도의 상태와 소요 시간을 남긴다. 이게 없으면 회복 기록의 증상이
+  // "간헐 실패 후 회복"뿐이라, 1회차가 404였는지 타임아웃이었는지를 개발팀이 추적할 수 없다.
+  // (실제로 오리진 장애는 '10초대 지연 후 404'라는 고유 시그니처를 갖는다 — 이걸 남겨야 원인이 보인다)
   async function gotoWithRetry(url: string, maxAttempts = 3) {
     let lastStatus = 0;
     let lastResponseTime = 0;
+    const failureLog: string[] = [];
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const startTime = Date.now();
       try {
-        const startTime = Date.now();
         const res = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 15000 });
         lastResponseTime = Date.now() - startTime;
         lastStatus = res?.status() ?? 0;
         if (lastStatus === 200) {
-          return { status: 200, responseTime: lastResponseTime, attempts: attempt, recovered: attempt > 1 };
+          return { status: 200, responseTime: lastResponseTime, attempts: attempt, recovered: attempt > 1, failureLog };
         }
-      } catch {
+        failureLog.push(`${attempt}회차 HTTP ${lastStatus} (${lastResponseTime}ms)`);
+      } catch (e) {
         lastStatus = 0; // 타임아웃/접속 불가
+        failureLog.push(`${attempt}회차 응답 없음 (${Date.now() - startTime}ms, ${(e as Error).message.split('\n')[0].slice(0, 60)})`);
       }
       if (attempt < maxAttempts) await page.waitForTimeout(1500 * attempt); // 1.5s → 3s 백오프 (오리진 회복 대기)
     }
-    return { status: lastStatus, responseTime: lastResponseTime, attempts: maxAttempts, recovered: false };
+    return { status: lastStatus, responseTime: lastResponseTime, attempts: maxAttempts, recovered: false, failureLog };
+  }
+
+  // ── API 실패 판정 기준 ──────────────────────────────────────────
+  // 401/403은 비로그인 헬스체크에서 정상 동작이므로 실패로 보지 않는다.
+  // 리포트 기록과 assert가 반드시 같은 기준을 쓰도록 한 곳에 모아둔다.
+  const apiIsFail = (s: number) => s >= 500 || s === 404;
+
+  // ── GET 재확인 헬퍼 (부작용 없는 재요청으로 단발 hiccup과 실제 장애 구분) ──
+  // gotoWithRetry는 브라우저 네비게이션용이라 API 엔드포인트엔 과하다. 여기선 HTTP 요청만 다시 던진다.
+  async function refetchWithRetry(url: string, maxAttempts = 3) {
+    let lastStatus = 0;
+    let lastResponseTime = 0;
+    const failureLog: string[] = [];
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const startTime = Date.now();
+      try {
+        const res = await page.request.get(url, { headers, timeout: REQUEST_TIMEOUT_MS });
+        lastStatus = res.status();
+        lastResponseTime = Date.now() - startTime;
+        if (!apiIsFail(lastStatus)) {
+          return { status: lastStatus, responseTime: lastResponseTime, attempts: attempt, recovered: attempt > 1, failureLog };
+        }
+        failureLog.push(`${attempt}회차 HTTP ${lastStatus} (${lastResponseTime}ms)`);
+      } catch {
+        lastStatus = 0;
+        failureLog.push(`${attempt}회차 응답 없음 (${Date.now() - startTime}ms)`);
+      }
+      if (attempt < maxAttempts) await page.waitForTimeout(1500 * attempt); // 1.5s → 3s 백오프
+    }
+    return { status: lastStatus, responseTime: lastResponseTime, attempts: maxAttempts, recovered: false, failureLog };
   }
 
   // ── 실패 시점 스크린샷 헬퍼 ────────────────────────────────────────
-  // 기존엔 test.info().attach()만 써서 playwright-report에는 남지만 워크플로가 아티팩트로 올리는
-  // test-results/screenshots/ 폴더엔 안 들어갔다(경로 불일치). 또 STEP은 전부 한 test라
-  // afterEach 스크린샷은 '실패 스텝'이 아니라 런 종료 시점 마지막 화면만 찍혀 쓸모가 적었다.
+  // test.info().attach()만 쓰면 playwright-report에는 남지만 워크플로가 아티팩트로 올리는
+  // test-results/screenshots/ 폴더엔 안 들어간다(경로 불일치).
   // → 실패가 난 그 자리에서 SCREENSHOT_DIR에 저장(아티팩트 반영) + 리포트에도 첨부한다.
   async function captureShot(label: string) {
     const safe = label.replace(/[^a-zA-Z0-9가-힣]/g, '_').slice(0, 60);
@@ -158,7 +208,6 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
     } catch (e) {
       console.log(`[SCREENSHOT] 캡처 실패(${label}): ${(e as Error).message}`);
     }
-    return filePath;
   }
 
   async function checkUrl(type: string, lang: string, url: string, isInternal: boolean = true) {
@@ -169,23 +218,28 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
     // 외부 링크는 쿼리 파라미터 포함한 원본 URL로 요청 (파라미터 제거 시 의도치 않은 동작 방지)
     const requestUrl = isInternal ? cleanUrl : url;
 
+    // 내부 링크는 오리진 순간 지연(캐시 미적용 SSR 페이지의 간헐 타임아웃/5xx/404) 오탐을 막기 위해
+    // 짧은 백오프로 재확인한다. 외부 링크는 WARN이라 지연 누적 방지를 위해 1회만 요청.
+    // (아래 catch에서도 시도 횟수·실패 내역을 증상에 써야 하므로 try 바깥에 둔다)
+    const maxAttempts = isInternal ? 3 : 1;
+    const failureLog: string[] = []; // 실패한 시도의 상태·소요 시간 — 회복 기록의 원인 추적용
+
     try {
       await page.waitForTimeout(Math.floor(Math.random() * 500) + 300);
 
-      // 내부 링크는 오리진 순간 지연(캐시 미적용 SSR 페이지의 간헐 타임아웃/5xx/404) 오탐을 막기 위해
-      // 짧은 백오프로 재확인한다. 외부 링크는 WARN이라 지연 누적 방지를 위해 1회만 요청.
-      const maxAttempts = isInternal ? 3 : 1;
       let res!: Awaited<ReturnType<typeof page.request.get>>;
       let responseTime = 0;
       let attempts = 0;
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         attempts = attempt;
+        const startTime = Date.now();
         try {
-          const startTime = Date.now();
-          res = await page.request.get(requestUrl, { headers, timeout: 8000 });
+          res = await page.request.get(requestUrl, { headers, timeout: REQUEST_TIMEOUT_MS });
           responseTime = Date.now() - startTime;
           if (res.status() === 200 || attempt >= maxAttempts) break; // 성공 또는 마지막 시도 → 아래에서 판정
+          failureLog.push(`${attempt}회차 HTTP ${res.status()} (${responseTime}ms)`);
         } catch (e) {
+          failureLog.push(`${attempt}회차 응답 없음 (${Date.now() - startTime}ms)`);
           if (attempt >= maxAttempts) throw e; // 마지막 시도까지 실패 → 바깥 catch(접속 불가)로
         }
         await page.waitForTimeout(1500 * attempt); // 1.5s → 3s 백오프 (오리진 회복 대기)
@@ -205,7 +259,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
         if (found) contentIssue = `콘텐츠 이상: "${found}" 감지`;
       }
 
-      const isSlow = responseTime > 3000;
+      const isSlow = responseTime > SLOW_MS;
       const result =
         status !== 200 ? (isInternal ? 'FAIL' : 'WARN') :
         contentIssue   ? 'FAIL' :
@@ -214,8 +268,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
       const notes: string[] = [];
       if (isRedirect)   notes.push(`리다이렉트 → ${finalUrl}`);
       if (contentIssue) notes.push(contentIssue);
-      if (isSlow)       notes.push(`응답 느림: ${responseTime}ms`);
-      if (recovered)    notes.push(`간헐 회복 (${attempts}회 시도)`);
+      // 3~12s는 SLOW로 흡수하되, 8s를 넘는 건 오리진 장애 전조라 로그에서 눈에 띄게 구분한다.
+      if (isSlow)       notes.push(`${responseTime > VERY_SLOW_MS ? '응답 매우 느림' : '응답 느림'}: ${responseTime}ms`);
+      if (recovered)    notes.push(`간헐 회복 (${attempts}회 시도${failureLog.length ? ' · ' + failureLog.join(', ') : ''})`);
       if (!isInternal)  notes.push('외부 링크');
       const noteStr = notes.join(' | ') || '정상';
 
@@ -224,13 +279,20 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
         const ts = kstNow();
         console.log(`[FAIL][${type}][${lang}] ${status} (${responseTime}ms) ${cleanUrl} @ ${ts}`);
         failRecords.push({ step: 'UI/링크', type, lang, url: cleanUrl, status, responseTime, symptom: noteStr, timestamp: ts });
-        expect.soft(status, `[${type}][${lang}] ${noteStr} → ${cleanUrl}`).toBe(200);
+        // status가 아니라 '판정 결과'를 단언한다. status로 단언하면 HTTP 200인데 점검 페이지가
+        // 내려온 경우(contentIssue)에 리포트는 FAIL인데 assert는 통과해, CI가 초록불이 되는
+        // 정합성 구멍이 생긴다.
+        expect.soft(status === 200 && !contentIssue, `[${type}][${lang}] ${noteStr} → ${cleanUrl}`).toBe(true);
       } else if (result === 'SLOW') {
         slowCount++;  // 정보성 집계만 — 런 상태(WARN)/헬스 스코어를 깎지 않고 CI도 실패시키지 않음
         console.log(`[SLOW][${type}][${lang}] ${status} (${responseTime}ms) ${cleanUrl}`);
       } else if (result === 'WARN') {
+        // 기록 없이 warnCount만 올리면 런은 노란불인데 대시보드엔 아무 흔적이 없어
+        // 나중에 원인을 되짚을 수 없다 → WARN도 반드시 근거를 남긴다.
         warnCount++;
+        const ts = kstNow();
         console.log(`[WARN][${type}][${lang}] ${status} (${responseTime}ms) [외부링크] ${cleanUrl}`);
+        failRecords.push({ step: 'UI/링크', type: '외부링크', lang, url: cleanUrl, status, responseTime, symptom: `외부 링크 응답 이상 (HTTP ${status})`, timestamp: ts, severity: 'WARN' });
       } else {
         passCount++;
         console.log(`[PASS][${type}][${lang}] ${status} (${responseTime}ms)${isRedirect ? ' [REDIRECT]' : ''} ${cleanUrl}`);
@@ -240,12 +302,17 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
       if (isInternal) {
         failCount++;
         const ts = kstNow();
-        console.log(`[ERROR][${type}][${lang}] 접속 불가: ${cleanUrl} @ ${ts}`);
-        failRecords.push({ step: 'UI/링크', type, lang, url: cleanUrl, status: 0, responseTime: 0, symptom: '접속 불가 / 타임아웃', timestamp: ts });
-        expect.soft(null, `[${type}][${lang}] 접속 불가/타임아웃 → ${cleanUrl}`).not.toBeNull();
+        // '접속 불가'로만 적으면 실제로는 연결이 살아 있고 응답만 느렸던 경우까지 단절로 오기재된다.
+        // 타임아웃 값을 명시해 '얼마를 기다렸는데 안 왔는지'를 증상에 남긴다.
+        const symptom = `응답 없음 (${maxAttempts}회 시도 · 각 ${REQUEST_TIMEOUT_MS / 1000}초 대기)${failureLog.length ? ' · ' + failureLog.join(', ') : ''}`;
+        console.log(`[ERROR][${type}][${lang}] ${symptom}: ${cleanUrl} @ ${ts}`);
+        failRecords.push({ step: 'UI/링크', type, lang, url: cleanUrl, status: 0, responseTime: 0, symptom, timestamp: ts });
+        expect.soft(null, `[${type}][${lang}] ${symptom} → ${cleanUrl}`).not.toBeNull();
       } else {
         warnCount++;
+        const ts = kstNow();
         console.log(`[WARN][${type}][${lang}] 외부링크 접속 불가: ${cleanUrl}`);
+        failRecords.push({ step: 'UI/링크', type: '외부링크', lang, url: cleanUrl, status: 0, responseTime: 0, symptom: '외부 링크 접속 불가 / 타임아웃', timestamp: ts, severity: 'WARN' });
       }
     }
   }
@@ -312,7 +379,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
     const onRequest = (req: { url: () => string }) => {
       requestStartTimes.set(req.url(), Date.now());
     };
-    const onResponse = async (response: { request: () => any; url: () => string; status: () => number }) => {
+    const onResponse = (response: { request: () => any; url: () => string; status: () => number }) => {
       const req = response.request();
       const resUrl = response.url().split('?')[0];
       const resType = req.resourceType();
@@ -351,8 +418,12 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
       await test.step(`[${lang}] 페이지 탐색 → API 수집`, async () => {
         const startPage = `${baseUrl}/${lang}`;
         try {
-          await page.goto(startPage, { waitUntil: 'networkidle', timeout: 20000 });
+          // networkidle을 진입 조건으로 걸면 자산 하나가 안 끝날 때 20초를 통째로 날리고
+          // 그 언어의 API 수집이 0건이 된다. → 진입은 domcontentloaded로 확정하고,
+          // XHR을 긁어모으기 위한 안정화 대기만 별도로 짧게 준다(실패해도 그냥 진행).
+          await page.goto(startPage, { waitUntil: 'domcontentloaded', timeout: 20000 });
           await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+          await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
           await page.waitForTimeout(2000);
           console.log(`[INFO][${lang}] 페이지 탐색 완료, API 수집 중...`);
         } catch {
@@ -369,27 +440,48 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
       console.log(`[INFO] 총 ${apiRecords.length}개 API 수집 완료`);
 
       for (const rec of apiRecords) {
-        const isFail = rec.status >= 500 || rec.status === 404;
         const label = `[API][${rec.method}] ${rec.status} (${rec.time}ms) ${rec.note} → ${rec.url}`;
 
-        if (isFail) {
-          failCount++;
-          const ts = kstNow();
-          console.log(`[FAIL] ${label} @ ${ts}`);
-          failRecords.push({ step: 'STEP2·API', type: 'API', lang: '-', url: rec.url, status: rec.status, responseTime: rec.time, symptom: rec.note, timestamp: ts });
-          if (rec.status >= 500) {
-            try {
-              await page.goto(rec.url, { waitUntil: 'domcontentloaded', timeout: 10000 });
-              const ssPath = path.join(SCREENSHOT_DIR, `api-fail-${rec.status}-${Date.now()}.png`);
-              await page.screenshot({ path: ssPath, fullPage: true });
-              console.log(`[SCREENSHOT] API 500 스크린샷: ${ssPath}`);
-            } catch { /* 스크린샷 실패 시 무시 */ }
-          }
-          expect.soft(rec.status, label).toBeLessThan(500);
-        } else {
+        if (!apiIsFail(rec.status)) {
           passCount++;
           console.log(`[PASS] ${label}`);
+          continue;
         }
+
+        // 인터셉트로 한 번 관측한 실패를 그대로 확정하면, 오리진 단발 hiccup 하나가 런 전체를
+        // FAIL로 만든다. (실측: /tw/contact/faq 가 7초 지연 후 502 → 직후 10회 재요청은 전부 200)
+        // 다른 STEP은 전부 재시도를 거치는데 여기만 즉시 확정이라 판정 기준도 어긋났다.
+        // → 부작용 없는 GET만 재확인한다. POST/PUT 등은 재생하면 데이터가 생길 수 있어 금지.
+        const rv = rec.method === 'GET' ? await refetchWithRetry(rec.url) : null;
+
+        if (rv && !apiIsFail(rv.status)) {
+          passCount++;
+          const ts = kstNow();
+          const detail = rv.failureLog.length ? ` · ${rv.failureLog.join(', ')}` : '';
+          console.log(`[INFO][API] 간헐 실패 후 ${rv.attempts}회차 회복 (HTTP ${rv.status})${detail} → ${rec.url}`);
+          intermittentRecoveries.push({ step: 'STEP2·API', type: 'API', lang: '-', url: rec.url, status: rv.status, responseTime: rv.responseTime, symptom: `간헐 실패 후 회복 (최초 HTTP ${rec.status} → 재확인 ${rv.status}, ${rv.attempts}회 시도)${detail}`, timestamp: ts, severity: 'WARN' });
+          continue;
+        }
+
+        failCount++;
+        const ts = kstNow();
+        const detail = rv
+          ? ` (재확인 ${rv.attempts}회 실패${rv.failureLog.length ? ' · ' + rv.failureLog.join(', ') : ''})`
+          : ' (비GET이라 재확인 생략 — 부작용 방지)';
+        const finalStatus = rv ? rv.status : rec.status;
+        console.log(`[FAIL] ${label}${detail} @ ${ts}`);
+        failRecords.push({ step: 'STEP2·API', type: 'API', lang: '-', url: rec.url, status: finalStatus, responseTime: rec.time, symptom: `${rec.note}${detail}`, timestamp: ts });
+        if (finalStatus >= 500) {
+          try {
+            await page.goto(rec.url, { waitUntil: 'domcontentloaded', timeout: 10000 });
+            const ssPath = path.join(SCREENSHOT_DIR, `api-fail-${finalStatus}-${Date.now()}.png`);
+            await page.screenshot({ path: ssPath, fullPage: true });
+            console.log(`[SCREENSHOT] API 5xx 스크린샷: ${ssPath}`);
+          } catch { /* 스크린샷 실패 시 무시 */ }
+        }
+        // toBeLessThan(500)으로 단언하면 404는 통과해버려, 리포트엔 FAIL인데 CI는 초록이 된다.
+        // → 리포트의 실패 판정과 동일한 기준으로 단언한다.
+        expect.soft(apiIsFail(finalStatus), `${label}${detail}`).toBe(false);
       }
 
       const summary = apiRecords
@@ -406,6 +498,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   // STEP 3: UI 링크 전수조사 (내부/외부 분리)
   // ══════════════════════════════════════════════════════════════════
   await test.step('STEP 3 · UI 링크 전수조사 (ko / en / jp / tw)', async () => {
+    // 크롤이 시간 예산에 걸려 잘리면 '점검 안 한 링크'가 생기는데, 기존엔 조용히 끝나서
+    // 리포트가 '이상 없음'으로 보였다. 잘렸다는 사실 자체를 한 번은 남긴다.
+    let crawlTruncated = false;
     for (const lang of languages) {
       await test.step(`[${lang}] <a> 링크 수집 및 점검 (depth 2)`, async () => {
         const crawledPages = new Set<string>();
@@ -414,7 +509,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
         async function crawlPage(pageUrl: string, depth: number) {
           // 전체 test 타임아웃(10분) 전에 크롤을 자진 종료 — 크롤이 밀려 최종 리포트
           // 저장까지 못 가는 상황 방지. 예산 초과 시 남은 링크는 스킵하고 정상 종료.
-          if (Date.now() - testStartTime > CRAWL_DEADLINE_MS) return;
+          if (Date.now() - testStartTime > CRAWL_DEADLINE_MS) { crawlTruncated = true; return; }
           const cleanUrl = pageUrl.split('?')[0];
           if (crawledPages.has(cleanUrl)) return;
           crawledPages.add(cleanUrl);
@@ -424,7 +519,16 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
             await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
             await page.waitForTimeout(500);
           } catch {
-            console.log(`[SKIP][${lang}][depth${depth}] 페이지 진입 실패: ${pageUrl}`);
+            // 기존엔 로그만 남기고 조용히 빠졌다. 그러면 진입점(depth 0)이 실패했을 때
+            // 그 언어의 크롤이 통째로 사라지는데 카운터·리포트엔 흔적이 없어(미탐),
+            // '점검했는데 아무 문제 없음'과 '아예 점검을 못 함'이 구분되지 않았다.
+            warnCount++;
+            const ts = kstNow();
+            const symptom = depth === 0
+              ? `크롤 진입점 렌더 실패 — [${lang}] 링크 전수조사 미실행`
+              : `크롤 대상 페이지 렌더 실패 (depth ${depth}) — 하위 링크 미점검`;
+            console.log(`[WARN][크롤][${lang}][depth${depth}] ${symptom}: ${pageUrl} @ ${ts}`);
+            failRecords.push({ step: 'STEP3·크롤', type: '크롤', lang, url: cleanUrl, status: 0, responseTime: 0, symptom, timestamp: ts, severity: 'WARN' });
             return;
           }
 
@@ -436,7 +540,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
             for (const link of links) {
               // 링크 단위로도 예산 확인 — 링크가 많은 페이지에서 데드라인을 넘겨도
               // 페이지 진입 시점 체크만으론 못 멈추므로 여기서 끊는다.
-              if (Date.now() - testStartTime > CRAWL_DEADLINE_MS) break;
+              if (Date.now() - testStartTime > CRAWL_DEADLINE_MS) { crawlTruncated = true; break; }
               const rawUrl = await link.getAttribute('href');
               if (!rawUrl || rawUrl.startsWith('#') || rawUrl.startsWith('javascript:') || rawUrl.startsWith('mailto:')) continue;
               if (/\.(exe|apk|zip|dmg|msi|pkg)$/i.test(rawUrl)) continue; // 다운로드 파일 스킵
@@ -458,7 +562,12 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
               }
             }
           } catch {
-            console.log(`[SKIP][${lang}][depth${depth}] 링크 수집 중단: ${pageUrl}`);
+            // 링크 수집이 중간에 끊기면 그 페이지의 나머지 링크는 점검되지 않은 채 넘어간다 → 기록 필요.
+            warnCount++;
+            const ts = kstNow();
+            const symptom = '링크 수집 중 예외 — 해당 페이지의 잔여 링크 미점검';
+            console.log(`[WARN][크롤][${lang}][depth${depth}] ${symptom}: ${pageUrl} @ ${ts}`);
+            failRecords.push({ step: 'STEP3·크롤', type: '크롤', lang, url: cleanUrl, status: 0, responseTime: 0, symptom, timestamp: ts, severity: 'WARN' });
           }
 
           for (const nextUrl of internalToFollow) {
@@ -470,7 +579,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
 
         // depth 무관하게 발견된 term 페이지에서 탭 버튼 클릭으로 숨겨진 URL 감지
         for (const termUrl of termPagesFound) {
-          if (Date.now() - testStartTime > CRAWL_DEADLINE_MS) break; // 크롤 예산 공유
+          if (Date.now() - testStartTime > CRAWL_DEADLINE_MS) { crawlTruncated = true; break; } // 크롤 예산 공유
           if (crawledPages.has(termUrl)) continue;
           crawledPages.add(termUrl);
           try {
@@ -499,6 +608,16 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
         }
       });
     }
+
+    // 크롤이 잘렸다는 사실을 리포트에 한 번 남긴다. 이게 없으면 '점검해서 문제없음'과
+    // '시간이 없어 점검을 덜 함'이 리포트에서 똑같이 초록불로 보인다.
+    if (crawlTruncated) {
+      warnCount++;
+      const ts = kstNow();
+      const symptom = `크롤 시간 예산(${CRAWL_DEADLINE_MS / 60000}분) 초과로 링크 전수조사가 중단됨 — 미점검 링크 있음`;
+      console.log(`[WARN][크롤] ${symptom} @ ${ts}`);
+      failRecords.push({ step: 'STEP3·크롤', type: '크롤', lang: '-', url: baseUrl, status: 0, responseTime: 0, symptom, timestamp: ts, severity: 'WARN' });
+    }
   });
 
   // ══════════════════════════════════════════════════════════════════
@@ -513,7 +632,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
     for (const target of toolTargets) {
       // 4개 언어 확장으로 대상이 최대 24개 — 사이트가 느린 날 전체 타임아웃(10분)을 넘겨
       // 최종 리포트 저장이 날아가지 않도록, 안전 시점 이후엔 남은 항목을 스킵한다.
-      if (Date.now() - testStartTime > REPORT_SAFETY_MS) {
+      if (outOfBudget()) {
         console.log(`[SKIP][다운로드] 시간 예산 초과 — 이후 항목 건너뜀 (리포트 저장 보장)`);
         break;
       }
@@ -526,12 +645,15 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
           const responseTime = nav.responseTime;
           const status = nav.status;
 
-          // 재시도로 회복된 항목(간헐)은 진짜 장애와 분리해 WARN(간헐)으로 기록 — 페이지는 살아있음
+          // 재시도로 회복된 항목(간헐)은 페이지가 살아있으므로 즉시 WARN을 매기지 않는다.
+          // STEP 3(checkUrl)은 같은 상황을 PASS + 메모로 처리하는데 여기만 WARN이면 판정이 어긋나고,
+          // 무엇보다 대상이 20여 개라 건당 1%대 확률만으로도 런 5개 중 1개가 노란불이 된다.
+          // → 일단 모아두고, 한 런에 임계치 이상 몰릴 때만 아래 '간헐 회복 종합 판정'에서 WARN 승격.
           if (status === 200 && nav.recovered) {
-            warnCount++;
             const ts = kstNow();
-            console.log(`[WARN][다운로드][${target.name}] 간헐 실패 후 ${nav.attempts}회차 회복 (${responseTime}ms) ${target.url} @ ${ts}`);
-            failRecords.push({ step: 'STEP4·다운로드', type: '다운로드', lang: tlang, url: target.url, status, responseTime, symptom: `간헐 실패 후 회복 (${nav.attempts}회 시도)`, timestamp: ts, severity: 'WARN' });
+            const detail = nav.failureLog.length ? ` · ${nav.failureLog.join(', ')}` : '';
+            console.log(`[INFO][다운로드][${target.name}] 간헐 실패 후 ${nav.attempts}회차 회복 (${responseTime}ms)${detail} ${target.url} @ ${ts}`);
+            intermittentRecoveries.push({ step: 'STEP4·다운로드', type: '다운로드', lang: tlang, url: target.url, status, responseTime, symptom: `간헐 실패 후 회복 (${nav.attempts}회 시도)${detail}`, timestamp: ts, severity: 'WARN' });
           }
 
           let hasDownloadLink = false;
@@ -547,17 +669,20 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
           if (status !== 200) {
             failCount++;
             const ts = kstNow();
+            const detail = nav.failureLog.length ? ` · ${nav.failureLog.join(', ')}` : '';
             const symptom = status === 0
-              ? `접속 불가 / 타임아웃 (${nav.attempts}회 재시도 실패)`
-              : `HTTP ${status} 응답 (${nav.attempts}회 재시도 실패)`;
+              ? `응답 없음 (${nav.attempts}회 재시도 실패)${detail}`
+              : `HTTP ${status} 응답 (${nav.attempts}회 재시도 실패)${detail}`;
             console.log(`[FAIL][다운로드][${target.name}] ${status} (${responseTime}ms, ${nav.attempts}회 시도) ${target.url} @ ${ts}`);
             await captureShot(`실패_다운로드_${target.name}_${tlang}`); // 실제 장애 순간 화면 보존
             failRecords.push({ step: 'STEP4·다운로드', type: '다운로드', lang: tlang, url: target.url, status, responseTime, symptom, timestamp: ts });
             expect.soft(status, `[다운로드][${target.name}] 페이지 응답 실패(${nav.attempts}회 재시도) → ${target.url}`).toBe(200);
           } else if (!hasDownloadLink) {
             warnCount++;
+            const ts = kstNow();
             await captureShot(`경고_다운로드버튼미감지_${target.name}`);
             console.log(`[WARN][다운로드][${target.name}] 페이지 정상이나 다운로드 버튼 미감지 ${target.url}`);
+            failRecords.push({ step: 'STEP4·다운로드', type: '다운로드', lang: tlang, url: target.url, status, responseTime, symptom: '페이지는 정상이나 다운로드 버튼 미감지', timestamp: ts, severity: 'WARN' });
           } else {
             passCount++;
             console.log(`[PASS][다운로드][${target.name}] ${status} (${responseTime}ms) 다운로드 버튼 확인 ${target.url}`);
@@ -584,7 +709,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
                 }
               } catch {
                 warnCount++;
+                const ts = kstNow();
                 console.log(`[WARN][파일][${target.name}] 파일 접근 불가: ${fileUrl}`);
+                failRecords.push({ step: 'STEP4·파일URL', type: '파일', lang: tlang, url: fileUrl, status: 0, responseTime: 0, symptom: '파일 접근 불가 / 타임아웃', timestamp: ts, severity: 'WARN' });
               }
             }
           }
@@ -606,6 +733,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   // ══════════════════════════════════════════════════════════════════
   await test.step('STEP 5 · 언어별 핵심 콘텐츠 무결성 확인', async () => {
     for (const lang of languages) {
+      if (outOfBudget()) { console.log('[SKIP][콘텐츠] 시간 예산 초과 — 이후 언어 건너뜀'); break; }
       await test.step(`[콘텐츠][${lang}] 핵심 키워드 존재 확인`, async () => {
         const targetUrl = `${baseUrl}/${lang}`;
         try {
@@ -647,8 +775,26 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   // ══════════════════════════════════════════════════════════════════
   // STEP 6: 깨진 이미지 감지
   // ══════════════════════════════════════════════════════════════════
+  // 이미지 URL 정규화 — Next.js 이미지 프록시(/_next/image?url=...&w=..&q=..)는 쿼리가 곧
+  // 이미지 식별자라, 쿼리를 떼면 400이 나고 어떤 이미지인지도 알 수 없다.
+  // 기존 코드는 쿼리를 뗀 뒤 400이 나니까 이 형태를 통째로 스킵했고, 그 결과 ezlab.im의
+  // 이미지가 4개 언어 440개 전부 스킵돼 STEP 6이 실질적으로 아무것도 점검하지 않았다.
+  // → 프록시 URL은 쿼리를 유지해 요청하고, 중복 판정 키도 쿼리를 포함한다.
+  //   리포트에는 프록시 주소 대신 실제 원본 자산 경로를 보여줘 어떤 이미지가 깨졌는지 바로 알게 한다.
+  function normalizeImageUrl(src: string, origin: string) {
+    const abs = src.startsWith('http') ? src : origin + (src.startsWith('/') ? src : '/' + src);
+    const isProxy = abs.includes('/_next/image');
+    const fetchUrl = isProxy ? abs : abs.split('?')[0];
+    let displayUrl = fetchUrl;
+    if (isProxy) {
+      try { displayUrl = new URL(abs).searchParams.get('url') ?? fetchUrl; } catch { /* 파싱 실패 시 원본 유지 */ }
+    }
+    return { fetchUrl, displayUrl };
+  }
+
   await test.step('STEP 6 · 깨진 이미지 감지 (ko / en / jp / tw)', async () => {
     for (const lang of languages) {
+      if (outOfBudget()) { console.log('[SKIP][이미지] 시간 예산 초과 — 이후 언어 건너뜀'); break; }
       await test.step(`[${lang}] <img> 이미지 점검`, async () => {
         try {
           await page.goto(`${baseUrl}/${lang}`, { waitUntil: 'domcontentloaded', timeout: 15000 });
@@ -663,29 +809,30 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
 
         for (const img of images) {
           const src = await img.getAttribute('src');
-          if (!src || src.startsWith('data:') || src.startsWith('blob:') || src.includes('/_next/image')) continue; // Next.js 이미지 프록시는 쿼리 파라미터 필수라 스킵
+          if (!src || src.startsWith('data:') || src.startsWith('blob:')) continue;
 
-          const imgUrl = src.startsWith('http') ? src : baseUrl + (src.startsWith('/') ? src : '/' + src);
-          const cleanSrc = imgUrl.split('?')[0];
-          if (visitedUrls.has(cleanSrc)) continue;
-          visitedUrls.add(cleanSrc);
+          const { fetchUrl, displayUrl } = normalizeImageUrl(src, baseUrl);
+          if (checkedImageUrls.has(fetchUrl)) continue;
+          checkedImageUrls.add(fetchUrl);
 
           try {
-            const res = await page.request.get(cleanSrc, { headers, timeout: 8000 });
+            const res = await page.request.get(fetchUrl, { headers, timeout: 8000 });
             const imgStatus = res.status();
             if (imgStatus !== 200) {
               warnCount++;
               const ts = kstNow();
-              console.log(`[WARN][이미지][${lang}] ${imgStatus} 깨진 이미지: ${cleanSrc}`);
-              failRecords.push({ step: 'STEP6·이미지', type: '이미지', lang, url: cleanSrc, status: imgStatus, responseTime: 0, symptom: `이미지 로드 실패 (${imgStatus})`, timestamp: ts, severity: 'WARN' });
+              console.log(`[WARN][이미지][${lang}] ${imgStatus} 깨진 이미지: ${displayUrl}`);
+              failRecords.push({ step: 'STEP6·이미지', type: '이미지', lang, url: displayUrl, status: imgStatus, responseTime: 0, symptom: `이미지 로드 실패 (${imgStatus})`, timestamp: ts, severity: 'WARN' });
               if (!imgShotDone) { await captureShot(`경고_깨진이미지_${lang}`); imgShotDone = true; }
             } else {
               passCount++;
-              console.log(`[PASS][이미지][${lang}] ${imgStatus} ${cleanSrc}`);
+              console.log(`[PASS][이미지][${lang}] ${imgStatus} ${displayUrl}`);
             }
           } catch {
             warnCount++;
-            console.log(`[WARN][이미지][${lang}] 접근 불가: ${cleanSrc}`);
+            const ts = kstNow();
+            console.log(`[WARN][이미지][${lang}] 접근 불가: ${displayUrl}`);
+            failRecords.push({ step: 'STEP6·이미지', type: '이미지', lang, url: displayUrl, status: 0, responseTime: 0, symptom: '이미지 접근 불가 / 타임아웃', timestamp: ts, severity: 'WARN' });
           }
         }
       });
@@ -706,6 +853,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
 
   await test.step('STEP 7 · 로그인 폼 렌더링 확인 (언어별)', async () => {
     for (const { lang, buttons } of loginChecks) {
+      if (outOfBudget()) { console.log('[SKIP][로그인] 시간 예산 초과 — 이후 언어 건너뜀'); break; }
       await test.step(`[로그인][${lang}] 버튼 존재 확인`, async () => {
         const loginUrl = `${baseUrl}/${lang}/login`;
         try {
@@ -715,10 +863,20 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
           if (nav.status !== 200) {
             failCount++;
             const ts = kstNow();
-            console.log(`[ERROR][로그인][${lang}] 페이지 진입 실패: ${nav.status} (${nav.attempts}회 시도) ${loginUrl} @ ${ts}`);
-            failRecords.push({ step: 'STEP7·로그인폼', type: '로그인', lang, url: loginUrl, status: nav.status, responseTime: nav.responseTime, symptom: `페이지 진입 실패 (HTTP ${nav.status}, ${nav.attempts}회 재시도)`, timestamp: ts });
+            const detail = nav.failureLog.length ? ` · ${nav.failureLog.join(', ')}` : '';
+            console.log(`[ERROR][로그인][${lang}] 페이지 진입 실패: ${nav.status} (${nav.attempts}회 시도)${detail} ${loginUrl} @ ${ts}`);
+            failRecords.push({ step: 'STEP7·로그인폼', type: '로그인', lang, url: loginUrl, status: nav.status, responseTime: nav.responseTime, symptom: `페이지 진입 실패 (HTTP ${nav.status}, ${nav.attempts}회 재시도)${detail}`, timestamp: ts });
             expect.soft(nav.status, `[로그인][${lang}] 페이지 진입 실패 → ${loginUrl}`).toBe(200);
             return; // 페이지가 안 떴으면 버튼 검사 무의미
+          }
+
+          // 로그인 페이지도 tool 페이지와 같은 no-store(오리진 직격) 경로라 간헐 실패가 난다.
+          // STEP 4와 동일하게 회복 건은 모아뒀다가 런 단위로 한 번에 판정한다.
+          if (nav.recovered) {
+            const ts = kstNow();
+            const detail = nav.failureLog.length ? ` · ${nav.failureLog.join(', ')}` : '';
+            console.log(`[INFO][로그인][${lang}] 간헐 실패 후 ${nav.attempts}회차 회복${detail} ${loginUrl} @ ${ts}`);
+            intermittentRecoveries.push({ step: 'STEP7·로그인폼', type: '로그인', lang, url: loginUrl, status: 200, responseTime: nav.responseTime, symptom: `간헐 실패 후 회복 (${nav.attempts}회 시도)${detail}`, timestamp: ts, severity: 'WARN' });
           }
 
           const missing: string[] = [];
@@ -771,29 +929,61 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   };
 
   await test.step('STEP 8 · 이지다운(ezdown.kr) 정보 페이지 점검', async () => {
-    const ezdownSeenImg = new Set<string>(); // 언어 간 공통 이미지 중복 fetch 방지
     console.log(`[INFO] STEP 8 이지다운 점검 대상: ${languages.map(l => `${ezdownBase}/${l}/`).join(', ')}`);
     for (const lang of languages) {
+      if (outOfBudget()) { console.log('[SKIP][이지다운] 시간 예산 초과 — 이후 언어 건너뜀'); break; }
       await test.step(`[이지다운][${lang}] 렌더 / 콘텐츠 / 이미지`, async () => {
         const url = `${ezdownBase}/${lang}/`;
+        const MIN_BODY_LEN = 300; // 렌더 완료 판정 기준 (실측: ko 1436자 / en 2569자 / jp 1365자 / tw 1117자)
         try {
-          const res = await page.goto(url, { waitUntil: 'networkidle', timeout: 20000 });
-          const status = res?.status() ?? 0;
+          // 기존엔 waitUntil:'networkidle'을 썼는데, 이 페이지는 자산 요청이 74~76개라
+          // 그중 하나만 안 끝나도 networkidle이 영영 오지 않는다 → 20초 타임아웃 → catch로 떨어져
+          // 실제로는 0.2초에 다 뜬 페이지가 '접속 불가'로 오기재됐다. (7/22·6/7 FAIL이 이 패턴)
+          // → 다른 STEP과 동일하게 domcontentloaded + 재시도로 진입하고,
+          //   판정에 필요한 조건(본문 렌더)만 직접 기다린다.
+          const nav = await gotoWithRetry(url);
+          const status = nav.status;
           visitedUrls.add(url);
 
-          // 1) 렌더 생존 — SPA라 모든 경로가 200을 주므로 타이틀+본문으로 실제 렌더 확인
-          const title    = (await page.title()) || '';
-          const bodyText = await page.locator('body').innerText();
-          const rendered = /ezdown|이지다운/i.test(title) && bodyText.trim().length > 300;
-
-          if (status !== 200 || !rendered) {
+          if (status !== 200) {
             failCount++;
             const ts = kstNow();
-            const symptom = status !== 200
-              ? `HTTP ${status} 응답`
-              : `렌더 실패 (title="${title}", 본문 ${bodyText.trim().length}자)`;
+            const detail = nav.failureLog.length ? ` · ${nav.failureLog.join(', ')}` : '';
+            const symptom = status === 0
+              ? `응답 없음 (${nav.attempts}회 재시도 실패)${detail}`
+              : `HTTP ${status} 응답 (${nav.attempts}회 재시도 실패)${detail}`;
             console.log(`[FAIL][이지다운][${lang}] ${symptom} ${url} @ ${ts}`);
-            failRecords.push({ step: 'STEP8·이지다운', type: '이지다운', lang, url, status, responseTime: 0, symptom, timestamp: ts });
+            failRecords.push({ step: 'STEP8·이지다운', type: '이지다운', lang, url, status, responseTime: nav.responseTime, symptom, timestamp: ts });
+            expect.soft(status, `[이지다운][${lang}] 페이지 진입 실패 → ${url}`).toBe(200);
+            return;
+          }
+
+          if (nav.recovered) {
+            const ts = kstNow();
+            const detail = nav.failureLog.length ? ` · ${nav.failureLog.join(', ')}` : '';
+            console.log(`[INFO][이지다운][${lang}] 간헐 실패 후 ${nav.attempts}회차 회복${detail} ${url} @ ${ts}`);
+            intermittentRecoveries.push({ step: 'STEP8·이지다운', type: '이지다운', lang, url, status: 200, responseTime: nav.responseTime, symptom: `간헐 실패 후 회복 (${nav.attempts}회 시도)${detail}`, timestamp: ts, severity: 'WARN' });
+          }
+
+          // 1) 렌더 생존 — SPA라 DOM 로드 직후엔 본문이 비어 있다.
+          //    전체 네트워크가 잠잠해지길 기다리는 대신 '본문이 채워졌는지'만 폴링해서 기다린다.
+          await page.waitForFunction(
+            (min) => (document.body?.innerText.trim().length ?? 0) > min,
+            MIN_BODY_LEN,
+            { timeout: 15000 },
+          ).catch(() => { /* 최종 판정은 아래 rendered 검사에 맡긴다 */ });
+
+          const title    = (await page.title()) || '';
+          const bodyText = await page.locator('body').innerText();
+          const rendered = /ezdown|이지다운/i.test(title) && bodyText.trim().length > MIN_BODY_LEN;
+
+          if (!rendered) {
+            failCount++;
+            const ts = kstNow();
+            const symptom = `렌더 실패 (title="${title}", 본문 ${bodyText.trim().length}자 · 기준 ${MIN_BODY_LEN}자)`;
+            console.log(`[FAIL][이지다운][${lang}] ${symptom} ${url} @ ${ts}`);
+            await captureShot(`실패_이지다운렌더_${lang}`);
+            failRecords.push({ step: 'STEP8·이지다운', type: '이지다운', lang, url, status, responseTime: nav.responseTime, symptom, timestamp: ts });
             expect.soft(rendered, `[이지다운][${lang}] 렌더 실패 → ${url}`).toBe(true);
             return;
           }
@@ -819,31 +1009,38 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
           let ezdownImgShotDone = false; // 페이지당 화면 1장만
           for (const img of imgs) {
             const src = await img.getAttribute('src');
-            if (!src || src.startsWith('data:') || src.startsWith('blob:') || src.includes('/_next/image')) continue;
-            const imgUrl   = src.startsWith('http') ? src : ezdownBase + (src.startsWith('/') ? src : '/' + src);
-            const cleanSrc = imgUrl.split('?')[0];
-            if (ezdownSeenImg.has(cleanSrc)) continue;
-            ezdownSeenImg.add(cleanSrc);
+            if (!src || src.startsWith('data:') || src.startsWith('blob:')) continue;
+            // STEP 6과 동일한 정규화 사용 — 현재 ezdown은 일반 경로만 쓰지만, Next.js 이미지로
+            // 바뀌는 순간 STEP 6이 겪었던 '전량 스킵' 구멍이 여기서 재발하지 않도록 미리 통일한다.
+            const { fetchUrl, displayUrl } = normalizeImageUrl(src, ezdownBase);
+            if (checkedImageUrls.has(fetchUrl)) continue;
+            checkedImageUrls.add(fetchUrl);
             try {
-              const ir = await page.request.get(cleanSrc, { headers, timeout: 8000 });
+              const ir = await page.request.get(fetchUrl, { headers, timeout: 8000 });
               if (ir.status() !== 200) {
                 warnCount++;
                 const ts = kstNow();
-                console.log(`[WARN][이지다운][이미지][${lang}] ${ir.status()} ${cleanSrc}`);
-                failRecords.push({ step: 'STEP8·이지다운이미지', type: '이미지', lang, url: cleanSrc, status: ir.status(), responseTime: 0, symptom: `이미지 로드 실패 (${ir.status()})`, timestamp: ts, severity: 'WARN' });
+                console.log(`[WARN][이지다운][이미지][${lang}] ${ir.status()} ${displayUrl}`);
+                failRecords.push({ step: 'STEP8·이지다운이미지', type: '이미지', lang, url: displayUrl, status: ir.status(), responseTime: 0, symptom: `이미지 로드 실패 (${ir.status()})`, timestamp: ts, severity: 'WARN' });
                 if (!ezdownImgShotDone) { await captureShot(`경고_이지다운깨진이미지_${lang}`); ezdownImgShotDone = true; }
               }
             } catch {
               warnCount++;
-              console.log(`[WARN][이지다운][이미지][${lang}] 접근 불가: ${cleanSrc}`);
+              const ts = kstNow();
+              console.log(`[WARN][이지다운][이미지][${lang}] 접근 불가: ${displayUrl}`);
+              failRecords.push({ step: 'STEP8·이지다운이미지', type: '이미지', lang, url: displayUrl, status: 0, responseTime: 0, symptom: '이미지 접근 불가 / 타임아웃', timestamp: ts, severity: 'WARN' });
             }
           }
-        } catch {
+        } catch (e) {
+          // 진입 실패(404/타임아웃)는 위 gotoWithRetry가 status로 처리하므로,
+          // 여기 남는 건 렌더 판정·이미지 점검 중 발생한 예외뿐이다. 증상을 뭉뚱그려
+          // '접속 불가'로 적으면 원인이 사라지므로 실제 예외 메시지를 남긴다.
           failCount++;
           const ts = kstNow();
-          console.log(`[ERROR][이지다운][${lang}] 접속/렌더 불가: ${url} @ ${ts}`);
-          failRecords.push({ step: 'STEP8·이지다운', type: '이지다운', lang, url, status: 0, responseTime: 0, symptom: '접속 불가 / 타임아웃', timestamp: ts });
-          expect.soft(null, `[이지다운][${lang}] 접속 불가 → ${url}`).not.toBeNull();
+          const symptom = `점검 중 예외: ${(e as Error).message.split('\n')[0].slice(0, 120)}`;
+          console.log(`[ERROR][이지다운][${lang}] ${symptom} ${url} @ ${ts}`);
+          failRecords.push({ step: 'STEP8·이지다운', type: '이지다운', lang, url, status: 0, responseTime: 0, symptom, timestamp: ts });
+          expect.soft(null, `[이지다운][${lang}] ${symptom} → ${url}`).not.toBeNull();
         }
       });
     }
@@ -860,6 +1057,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
     const CERT_WARN_DAYS = 14;
     const certHosts = ['ezlab.im', 'ezdown.kr'];
     for (const host of certHosts) {
+      if (outOfBudget()) { console.log('[SKIP][인증서] 시간 예산 초과 — 이후 호스트 건너뜀'); break; }
       await test.step(`[인증서][${host}] 만료일 확인`, async () => {
         try {
           const { daysLeft, validTo } = await checkCertExpiry(host);
@@ -895,6 +1093,38 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   });
 
   // ══════════════════════════════════════════════════════════════════
+  // 간헐 회복 종합 판정 — 런 단위로 한 번만
+  // ══════════════════════════════════════════════════════════════════
+  //   재시도로 회복한 항목은 사용자에게 페이지가 정상으로 보인 케이스다. 항목별로 WARN을 매기면
+  //   대상이 20여 개라 건당 1%대의 오리진 지연만으로도 런 5개 중 1개가 노란불이 된다(증폭).
+  //   → 1건은 PASS 취급(정보성 기록만), 임계치 이상 몰릴 때만 '오리진 불안정'으로 WARN 1건 승격.
+  await test.step('간헐 회복 종합 판정', async () => {
+    if (intermittentRecoveries.length === 0) {
+      console.log('[INFO][간헐] 재시도 회복 항목 없음');
+      return;
+    }
+    const targets = [...new Set(intermittentRecoveries.map(r => r.url))].join(', ');
+    if (intermittentRecoveries.length >= INTERMITTENT_WARN_THRESHOLD) {
+      warnCount++;
+      const ts = kstNow();
+      const symptom = `오리진 간헐 불안정 — 재시도 회복 ${intermittentRecoveries.length}건 (임계치 ${INTERMITTENT_WARN_THRESHOLD}건)`;
+      console.log(`[WARN][간헐] ${symptom}: ${targets} @ ${ts}`);
+      // 종합 1건 + 개별 근거를 함께 남겨 개발팀이 어느 경로가 흔들렸는지 볼 수 있게 한다.
+      failRecords.push({ step: '간헐·종합', type: '간헐', lang: '-', url: baseUrl, status: 200, responseTime: 0, symptom, timestamp: ts, severity: 'WARN' });
+      failRecords.push(...intermittentRecoveries);
+    } else {
+      // 1건은 정상 범위 — 런 상태를 바꾸지 않되 추이 관찰용으로 로그만 남긴다.
+      console.log(`[INFO][간헐] 재시도 회복 ${intermittentRecoveries.length}건 (임계치 ${INTERMITTENT_WARN_THRESHOLD}건 미만 → 런 상태 미반영): ${targets}`);
+    }
+    await test.info().attach('간헐 회복 내역', {
+      body: intermittentRecoveries
+        .map((r, i) => `[${i + 1}] ${r.step} | ${r.lang} | ${r.timestamp}\n     ${r.url}\n     ${r.symptom}`)
+        .join('\n\n'),
+      contentType: 'text/plain; charset=utf-8',
+    });
+  });
+
+  // ══════════════════════════════════════════════════════════════════
   // 최종 요약 + 배지용 JSON 저장
   // ══════════════════════════════════════════════════════════════════
   const totalCount = passCount + failCount + warnCount + slowCount;
@@ -915,10 +1145,12 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
     sep2,
     '[전체 결과]',
     `  PASS ${passCount}  /  FAIL ${failCount}  /  WARN ${warnCount}  /  SLOW ${slowCount}  /  TOTAL ${totalCount}`,
-    '  ※ SLOW(느린 응답)는 정보성 지표 — 헬스 스코어에 반영되지 않음',
+    `  ※ SLOW(${SLOW_MS / 1000}초 초과 응답)는 정보성 지표 — 헬스 스코어에 반영되지 않음`,
+    `  ※ 간헐 회복 ${intermittentRecoveries.length}건 — ${INTERMITTENT_WARN_THRESHOLD}건 이상일 때만 WARN 승격`,
     sep2,
     '[점검 범위]',
     `  페이지 / 링크 : ${visitedUrls.size}개`,
+    `  이미지        : ${checkedImageUrls.size}개`,
     `  API           : ${apiRecords.length}개`,
     sep2,
     '[STEP별 상태]',
@@ -976,6 +1208,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
         r.type === '이미지'  ? '이미지 서버 / CDN 확인' :
         r.type === '로그인'  ? '로그인 페이지 렌더링 확인' :
         r.type === '이지다운' ? '이지다운 사이트(ezdown.kr) 확인' :
+        r.type === '외부링크' ? '외부 서비스 상태 — 이지랩 장애 아님 (링크 유효성만 확인)' :
+        r.type === '크롤'    ? '점검 범위 축소됨 — 해당 페이지 렌더 상태 확인 필요' :
+        r.type === '간헐'    ? '오리진(nginx+SSR) 확인 — no-store 경로라 CDN 캐시 없이 매 요청 직격' :
         r.type === '인증서'  ? 'SSL 인증서 갱신 필요 (CA/호스팅 인증서 자동갱신 확인)' : '담당팀 확인 요청'
       }`,
     ].join('\n')).join('\n\n');
@@ -1035,6 +1270,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   console.log(`\n${'═'.repeat(60)}`);
   console.log(`[DONE] 전체 점검 완료`);
   console.log(`  페이지/링크: ${visitedUrls.size}개`);
+  console.log(`  이미지: ${checkedImageUrls.size}개`);
   console.log(`  API: ${apiRecords.length}개`);
   console.log(`  결과: PASS ${passCount} / FAIL ${failCount} / WARN ${warnCount} / SLOW ${slowCount} / TOTAL ${totalCount}`);
   console.log(`  상태: ${status}`);
