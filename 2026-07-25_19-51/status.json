@@ -1,0 +1,1 @@
+{"status":"PASS","passCount":254,"failCount":0,"warnCount":0,"slowCount":0,"serverTimes":{"ko":563,"en":209,"jp":729,"tw":206},"certs":[{"host":"ezlab.im","daysLeft":130,"validTo":"2026-12-02","status":"PASS"},{"host":"ezdown.kr","daysLeft":68,"validTo":"2026-10-01","status":"PASS"}],"failures":[]}
