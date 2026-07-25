@@ -86,7 +86,7 @@ def _down(s):
     return s in ('FAIL', 'UNKNOWN')
 
 
-# 현재까지 이어진 실패 스트릭 길이(현재 런 포함)
+# 현재까지 이어진 다운(FAIL/UNKNOWN) 스트릭 길이(현재 런 포함) — 복구 알림 판정에 사용
 streak = 0
 if _down(cur):
     streak = 1
@@ -95,7 +95,18 @@ if _down(cur):
             streak += 1
         else:
             break
-# 현재 직전까지 이어졌던 실패 스트릭 길이 — 복구 알림을 낼지(=직전 장애가 실제 알림됐는지) 판단용
+# FAIL 전용 스트릭 — 사이트 '장애 감지' 알림은 연속 FAIL만으로 판정한다.
+# UNKNOWN(테스트 미완주=인프라 이상)은 아래에서 1회부터 즉시 별도 알림되므로, 여기에 섞으면
+# UNKNOWN 직후 단발 FAIL이 streak=2를 채워 실제 사이트 장애처럼 '장애 감지'로 오승격된다(QA-17).
+fail_streak = 0
+if cur == 'FAIL':
+    fail_streak = 1
+    for s in recent:
+        if s == 'FAIL':
+            fail_streak += 1
+        else:
+            break
+# 현재 직전까지 이어졌던 다운 스트릭 길이 — 복구 알림을 낼지(=직전 장애가 실제 알림됐는지) 판단용
 prev_streak = 0
 for s in recent:
     if _down(s):
@@ -105,9 +116,9 @@ for s in recent:
 
 is_fail     = cur == 'FAIL'
 is_unknown  = cur == 'UNKNOWN'                       # 테스트 미완주 — 헬스체크 자체 이상
-# UNKNOWN은 1회부터, FAIL은 THRESHOLD 연속부터 알림
-down_alert  = is_unknown or (is_fail and streak >= THRESHOLD)
-is_new_fail = is_fail and streak == THRESHOLD        # 임계 도달 첫 알림 = '장애 감지', 이후 = '지속 중'
+# UNKNOWN은 1회부터, FAIL은 연속 FAIL THRESHOLD회부터 알림
+down_alert  = is_unknown or (is_fail and fail_streak >= THRESHOLD)
+is_new_fail = is_fail and fail_streak == THRESHOLD   # 임계 도달 첫 알림 = '장애 감지', 이후 = '지속 중'
 # 복구: 정상 전환 && 직전 장애가 '실제로 알림된' 수준이었을 때만 — 단발 blip 자동회복은 침묵.
 prev_alerted = prev_streak >= THRESHOLD or (bool(recent) and recent[0] == 'UNKNOWN')
 is_recovery  = cur in ('PASS', 'WARN') and _down(prev) and prev_alerted
@@ -166,7 +177,10 @@ elif is_fail:
     header = '🚨 이지랩 헬스체크 *장애 감지*' if is_new_fail else '🚨 이지랩 헬스체크 *장애 지속 중*'
     color  = '#e5534b'
     types  = ', '.join(sorted({f.get('type', '-') for f in fail_only})) or '-'
-    lines  = [f'*FAIL {fail_c}* · WARN {warn_c} · PASS {pass_c}', f'영향 범위: *{types}*']
+    # 연속 실패 횟수를 항상 본문에 남긴다. 첫 '장애 감지' 알림의 POST가 4회 재시도까지 모두 실패해
+    # 유실돼도(이후 런은 '지속 중'만 발송), 이 줄로 '몇 회째 지속'인지가 채널에 남아 시작 시점을 알 수 있다.
+    lines  = [f'*FAIL {fail_c}* · WARN {warn_c} · PASS {pass_c}',
+              f'영향 범위: *{types}*', f'연속 실패: *{fail_streak}회째*']
     for i, fr in enumerate(fail_only[:5], 1):
         st  = fr.get('status', 0)
         st_txt = 'timeout' if not st else str(st)

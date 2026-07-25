@@ -700,13 +700,75 @@ css = """
 
   .footer { text-align: center; color: #3d4451; font-size: .75rem; margin-top: 20px; }
 
+  /* SSL 인증서 만료 패널 */
+  .cert-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 12px; }
+  .cert-top { display: flex; justify-content: space-between; align-items: baseline; }
+  .cert-host { font-size: .85rem; font-weight: 700; color: #c9d1d9; }
+  .cert-days { font-size: .85rem; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .cert-meter { position: relative; height: 8px; background: #0d1117; border: 1px solid #21262d;
+                border-radius: 5px; margin-top: 9px; overflow: hidden; }
+  .cert-danger { position: absolute; left: 0; top: 0; height: 100%; background: rgba(248,81,73,.20); }
+  .cert-fill { position: absolute; left: 0; top: 0; height: 100%; border-radius: 5px; }
+  .cert-scale { display: flex; justify-content: space-between; font-size: .66rem; color: #484f58; margin-top: 5px; }
+
   @media (max-width: 540px) {
     .ov-grid { grid-template-columns: 1fr 1fr; }
     .ov-grid > .ov-card:last-child { grid-column: span 2; }
     .spark-grid { grid-template-columns: repeat(2, 1fr); }
     .perf-summary { display: none; }
+    .cert-grid { grid-template-columns: 1fr; }
   }
 """
+
+# ── SSL 인증서 패널 ───────────────────────────────────────────────────
+# perf_history[run].certs 에서 최신 스냅샷을 읽는다(현재 런 우선, 없으면 인증서 정보가 있는 최근 런으로
+# 폴백 — 예산 스킵/구버전 런 대비). PASS 포함 전 호스트를 미터로 표시한다.
+CERT_WARN_DAYS, CERT_FAIL_DAYS, CERT_SCALE = 14, 7, 180
+
+def _latest_certs():
+    for e in [current_run] + entries:
+        c = perf_history.get(e, {}).get('certs')
+        if c:
+            return c, e
+    return [], None
+
+def build_cert_panel():
+    certs, run_key = _latest_certs()
+    if not certs:
+        return ''  # 인증서 데이터가 아직 없으면(구버전 런) 패널 자체를 생략
+    danger_pct = CERT_WARN_DAYS / CERT_SCALE * 100
+    items = ''
+    for c in certs:
+        host = escape(str(c.get('host', '-')))
+        st   = c.get('status', 'PASS')
+        days = c.get('daysLeft')
+        valid = escape(str(c.get('validTo') or '-'))
+        if st == 'ERROR' or days is None:
+            color, dtxt, fill, sub = '#8b949e', '확인 실패', 0.0, '인증서 정보를 읽지 못함'
+        else:
+            color = '#f85149' if st == 'FAIL' else ('#d29922' if st == 'WARN' else '#3fb950')
+            dtxt  = '만료됨' if days < 0 else f'D-{days}'
+            fill  = max(0.0, min(100.0, days / CERT_SCALE * 100))
+            sub   = f'만료 {valid}'
+        items += (
+            f'<div class="cert-item">'
+            f'<div class="cert-top"><span class="cert-host">{host}</span>'
+            f'<span class="cert-days" style="color:{color}">{dtxt}</span></div>'
+            f'<div class="cert-meter"><div class="cert-danger" style="width:{danger_pct:.1f}%"></div>'
+            f'<div class="cert-fill" style="width:{fill:.1f}%;background:{color}"></div></div>'
+            f'<div class="cert-scale"><span>D-0</span><span>{sub}</span></div></div>'
+        )
+    stale = ''
+    if run_key and run_key != current_run:
+        stale = f'<span class="section-sub">기준 {escape(run_key.replace("_", " ").replace("-", ":"))}</span>'
+    return (
+        f'<div class="card">'
+        f'<div class="section-title">SSL 인증서 만료'
+        f'<span class="section-sub">경고 D-{CERT_WARN_DAYS} · 장애 D-{CERT_FAIL_DAYS}</span>{stale}</div>'
+        f'<div class="cert-grid">{items}</div></div>'
+    )
+
+cert_panel_html = build_cert_panel()
 
 # ── HTML ──────────────────────────────────────────────────────────────
 html = f"""<!DOCTYPE html>
@@ -737,6 +799,8 @@ html = f"""<!DOCTYPE html>
     </div>
     {sparklines_html}
   </div>
+
+  {cert_panel_html}
 
   <div class="card">
     <div class="section-title">일별 가동률<span class="section-sub">최근 90일</span></div>

@@ -35,6 +35,10 @@ jobs:
       - name: 패키지 설치
         run: npm ci
 
+      # 타입 오류를 30분짜리 런타임이 아니라 여기서 즉시 잡는다 (브라우저 설치·테스트 전 빠른 실패)
+      - name: 타입 체크 (tsc --noEmit)
+        run: npx tsc --noEmit
+
       - name: Playwright 브라우저 설치 (Chromium)
         run: npx playwright install --with-deps chromium
 
@@ -76,17 +80,19 @@ jobs:
           RECENT_STATUSES=$(python3 -c "import json; d=json.load(open('/tmp/statuses.json')); ks=sorted(d,reverse=True)[:10]; print(','.join(d[k] for k in ks))" 2>/dev/null || echo "")
           echo "RECENT_STATUSES=$RECENT_STATUSES" >> $GITHUB_ENV
 
-          # 현재 런 포함 연속 다운(FAIL/UNKNOWN) 스트릭 → 이슈 생성 디바운스용 (Slack의 FAIL_ALERT_THRESHOLD=2와 동일 기준)
+          # 현재 런 포함 연속 FAIL 스트릭 → 이슈 생성 디바운스용 (Slack의 FAIL_ALERT_THRESHOLD=2와 동일 기준).
+          # UNKNOWN(테스트 미완주=인프라 이상)은 별도 즉시 알림 경로가 있으므로 사이트 장애 스트릭에 섞지 않는다.
+          # (섞으면 UNKNOWN 직후 단발 FAIL이 streak=2를 채워 '장애 감지'+이슈로 오승격됨 — notify_slack.py fail_streak과 일치)
           FAIL_STREAK=$(python3 - "$CURRENT_STATUS" <<'PYEOF' 2>/dev/null || echo 0
           import json, sys
           cur = sys.argv[1]
-          down = lambda s: s in ('FAIL', 'UNKNOWN')
+          isfail = lambda s: s == 'FAIL'
           streak = 0
-          if down(cur):
+          if isfail(cur):
               streak = 1
               d = json.load(open('/tmp/statuses.json'))
               for k in sorted(d, reverse=True):
-                  if down(d[k]): streak += 1
+                  if isfail(d[k]): streak += 1
                   else: break
           print(streak)
           PYEOF
@@ -102,6 +108,10 @@ jobs:
           cp /tmp/monthly-stats.json reports/monthly-stats.json
           cp /tmp/daily-stats.json reports/daily-stats.json
           cp /tmp/failures-history.json reports/failures-history.json
+
+          # 롤링 백업: 집계 파일은 루트에 단일본만 있어 손상/유실 시 복구 불가(120일 지난 월은 폴더도 없어 백필 불가).
+          # 보존되는 이번 런 폴더에 스냅샷을 남겨 최근 120일치 복구 지점을 확보한다(폴더가 prune되면 함께 정리됨).
+          cp /tmp/monthly-stats.json /tmp/daily-stats.json reports/$DATETIME/
 
           python3 scripts/generate_index.py /tmp/all_runs.txt "$DATETIME" /tmp/statuses.json /tmp/perf-history.json /tmp/monthly-stats.json /tmp/daily-stats.json /tmp/failures-history.json reports/index.html
 
@@ -139,15 +149,18 @@ jobs:
           PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
         run: |
           FAIL_TIME=$(TZ=Asia/Seoul date +'%Y-%m-%d %H:%M KST')
-          # 장애가 30분 주기로 지속되면 이슈가 중복 생성되므로, 열려 있는 헬스체크 이슈가
-          # 있으면 새로 만들지 않고 코멘트만 추가한다. (복구 시 사람이 직접 닫음)
-          EXISTING=$(gh issue list --state open --search '헬스체크 실패 감지 in:title' --json number --jq '.[0].number' 2>/dev/null || echo "")
+          ISSUE_LABEL="healthcheck-fail"
+          # 중복 이슈 판별을 '제목 전문검색'이 아니라 '고정 라벨'로 한다.
+          # GitHub 이슈 검색은 한글(CJK) 토크나이즈가 불안정해, 열린 이슈가 있는데도 검색이
+          # 빈 결과를 주면 30분마다 새 이슈가 생성되는 스팸이 났다 → 라벨 기반은 결정적으로 매칭된다.
+          gh label create "$ISSUE_LABEL" --color B60205 --description "이지랩 헬스체크 자동 감지 장애" 2>/dev/null || true
+          EXISTING=$(gh issue list --state open --label "$ISSUE_LABEL" --json number --jq '.[0].number' 2>/dev/null || echo "")
           if [ -n "$EXISTING" ]; then
             gh issue comment "$EXISTING" --body "🔁 장애 지속 감지 — $FAIL_TIME ([실행 로그]($REPORT_URL) · [대시보드]($PAGES_URL))" 2>/dev/null || true
             echo "기존 이슈 #$EXISTING 에 코멘트 추가 (중복 생성 방지)"
           else
             BODY=$(printf "## 이지랩 헬스체크 실패\n\n**감지 시각:** %s\n\n### 리포트 확인\n- [GitHub Actions 실행 로그](%s)\n- [헬스체크 리포트 페이지](%s)\n\n> 자동 생성된 이슈입니다. 서비스 복구 후 직접 닫아주세요." "$FAIL_TIME" "$REPORT_URL" "$PAGES_URL")
-            gh issue create --title "🚨 헬스체크 실패 감지 - $FAIL_TIME" --body "$BODY" 2>/dev/null || true
+            gh issue create --title "🚨 헬스체크 실패 감지 - $FAIL_TIME" --body "$BODY" --label "$ISSUE_LABEL" 2>/dev/null || true
           fi
 
       - name: 스크린샷 artifact 업로드

@@ -52,8 +52,29 @@ recent = sorted(statuses.keys(), reverse=True)[:CAP]
 statuses_out = {k: statuses[k] for k in recent}
 perf_out     = {k: perf[k] for k in recent}
 
-daily_out   = dict(sorted(daily.items()))
-monthly_out = dict(sorted(monthly.items()))
+# 기존 집계(gh-pages 루트)와 '축소 방지' 병합 — prune로 원본 실행 폴더가 삭제된 뒤 백필을 돌리면
+# 살아남은 폴더만으로 재구성돼 과거 월/일 누적이 줄어드는 footgun이 있었다(모듈 docstring 경고).
+# 항목별 max를 취해 과거 데이터가 절대 줄지 않게 한다. 폴더가 모두 사라진 과거 월도 기존값으로 보존.
+def _load_root(name):
+    try:
+        return json.loads(tf.extractfile(tf.getmember(name)).read())
+    except Exception:
+        return {}
+
+
+def _merge_max(existing, rebuilt):
+    out = {k: dict(v) for k, v in existing.items()}
+    for k, v in rebuilt.items():
+        if k not in out:
+            out[k] = dict(v)
+        else:
+            for s in ('PASS', 'WARN', 'FAIL'):
+                out[k][s] = max(int(out[k].get(s, 0)), int(v.get(s, 0)))
+    return out
+
+
+daily_out   = dict(sorted(_merge_max(_load_root('daily-stats.json'), daily).items()))
+monthly_out = dict(sorted(_merge_max(_load_root('monthly-stats.json'), monthly).items()))
 
 with open(f'{OUT}/daily-stats.json', 'w') as f:
     json.dump(daily_out, f, indent=2)

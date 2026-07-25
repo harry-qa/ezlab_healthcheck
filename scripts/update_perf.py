@@ -8,7 +8,8 @@ with open('/tmp/perf-history.json') as f:
 try:
     with open('report-status.json') as f:
         d = json.load(f)
-    h[datetime_key] = {'serverTimes': d.get('serverTimes', {})}
+    # certs: 최신 런의 SSL 인증서 스냅샷도 함께 저장 → 대시보드 인증서 패널이 읽는다.
+    h[datetime_key] = {'serverTimes': d.get('serverTimes', {}), 'certs': d.get('certs', [])}
 except Exception:
     h[datetime_key] = {}
 

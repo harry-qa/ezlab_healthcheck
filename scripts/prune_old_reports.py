@@ -68,6 +68,9 @@ push = git('push', 'origin', f'{commit}:refs/heads/gh-pages')
 sys.stdout.write(push.stdout)
 sys.stderr.write(push.stderr)
 if push.returncode != 0:
+    # 워크플로 스텝이 continue-on-error라 exit(1)은 조용히 삼켜진다 → 실패가 여러 런 이어지면
+    # gh-pages가 1GB 한도로 계속 커지는데 아무도 모른다. Actions 요약에 뜨는 경고로 가시화한다.
+    print('::warning title=헬스체크 리포트 정리 실패::prune push 실패 — 오래된 gh-pages 런 폴더가 정리되지 않았습니다(용량 누적 주의). 실행 로그를 확인하세요.')
     print('push 실패')
     sys.exit(1)
 print(f'삭제 완료: {len(old)}개')
