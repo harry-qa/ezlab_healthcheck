@@ -1,1 +1,1 @@
-{"status":"WARN","passCount":185,"failCount":0,"warnCount":2,"serverTimes":{"ko":505,"en":524,"jp":192,"tw":190},"failures":[]}
+{"status": "PASS", "passCount": 185, "failCount": 0, "warnCount": 0, "serverTimes": {"ko": 505, "en": 524, "jp": 192, "tw": 190}, "failures": []}
