@@ -148,8 +148,10 @@ fail_c   = data.get('failCount', 0)
 warn_c   = data.get('warnCount', 0)
 pass_c   = data.get('passCount', 0)
 failures = data.get('failures', []) or []
-# report-status.json 의 failures 는 FAIL+WARN 혼합 기록 — 장애 알림엔 실제 FAIL(severity!='WARN')만 나열.
-fail_only = [f for f in failures if f.get('severity') != 'WARN']
+# report-status.json 의 failures 는 FAIL+WARN+INFO 혼합 기록 — 장애 알림엔 실제 FAIL만 나열한다.
+# severity 미지정(None)이 FAIL이므로 '제외할 등급'을 나열하는 방식으로 필터한다. 새 등급이 생겼을 때
+# != 'WARN' 식으로 두면 그 등급이 조용히 장애 목록에 섞여 들어간다(INFO 도입 시 실제로 그럴 뻔했음).
+fail_only = [f for f in failures if f.get('severity') not in ('WARN', 'INFO')]
 
 links = []
 if pages_url: links.append(f'<{pages_url}|📊 대시보드>')

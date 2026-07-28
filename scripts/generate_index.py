@@ -410,9 +410,17 @@ for midx, month in enumerate(sorted_months_list):
                     '파일': '📄', '콘텐츠': '📝', '이미지': '🖼️',
                     '로그인': '🔑', 'UI': '🖱️', '이지다운': '📱',
                 }
+                # 스코어에 반영되는 등급(FAIL/WARN)과 정보성 등급(INFO)을 한 표에 섞어 보여주되
+                # 행을 흐리게 처리하고 배지를 달아 구분한다. 섞지 않고 숨기면 "왜 외부 링크가
+                # 깨졌는데 대시보드에 아무것도 없냐"가 되고, 구분 없이 섞으면 스코어가 왜 안 깎였는지 모른다.
                 f_rows = ''
+                info_n = 0
                 for fr in run_failures:
-                    icon     = type_icons.get(fr.get('type', ''), '⚠️')
+                    sev      = fr.get('severity')
+                    is_info  = sev == 'INFO'
+                    if is_info:
+                        info_n += 1
+                    icon     = 'ℹ️' if is_info else type_icons.get(fr.get('type', ''), '⚠️')
                     # 점검 대상 사이트에서 크롤링한 값(url/symptom 등)이 그대로 HTML에 들어가므로
                     # escape로 코드 실행/속성 탈출 차단 (html.escape는 따옴표까지 이스케이프 → title 속성도 안전).
                     f_url    = escape(str(fr.get('url', '-')))
@@ -424,8 +432,10 @@ for midx, month in enumerate(sorted_months_list):
                     status_cls = 'fs-5xx' if f_status >= 500 else ('fs-4xx' if f_status >= 400 else 'fs-other')
                     status_txt = str(f_status) if f_status > 0 else 'timeout'
                     time_txt   = f'{f_time}ms' if f_time > 0 else '—'
+                    if is_info:
+                        f_sym += ' <span class="fd-info-tag">스코어 미반영</span>'
                     f_rows += (
-                        f'<tr>'
+                        f'<tr class="{"fd-row-info" if is_info else ""}">'
                         f'<td class="fd-icon">{icon}</td>'
                         f'<td class="fd-step">{f_step}</td>'
                         f'<td class="fd-lang">{f_lang}</td>'
@@ -435,9 +445,16 @@ for midx, month in enumerate(sorted_months_list):
                         f'<td class="fd-sym">{f_sym}</td>'
                         f'</tr>'
                     )
+                scored_n = len(run_failures) - info_n
+                # 전건이 INFO면 런은 PASS인데 제목이 '장애 상세'라 초록 런에 빨간 헤더가 붙는다 → 제목·색을 등급에 맞춘다.
+                title_txt = '장애 상세' if scored_n else '참고 항목'
+                title_cls = 'dp-title-fail' if scored_n else 'dp-title-info'
+                count_txt = f'{scored_n}건' if not info_n else (
+                    f'{scored_n}건 · 참고 {info_n}건' if scored_n else f'{info_n}건'
+                )
                 failure_section = (
-                    f'<div class="dp-section dp-failure">'
-                    f'<div class="dp-title dp-title-fail">장애 상세 <span class="dp-sub">{len(run_failures)}건</span></div>'
+                    f'<div class="dp-section dp-failure{"" if scored_n else " dp-failure-info"}">'
+                    f'<div class="dp-title {title_cls}">{title_txt} <span class="dp-sub">{count_txt}</span></div>'
                     f'<div class="fd-scroll">'
                     f'<table class="fd-table"><tbody>{f_rows}</tbody></table>'
                     f'</div>'
@@ -660,7 +677,14 @@ css = """
 
   /* Failure detail table */
   .dp-failure { border-left: 2px solid #f85149; padding-left: 10px; }
+  /* 전건이 INFO(스코어 미반영)인 런은 빨간 강조를 걷어낸다 — 런 자체는 PASS다 */
+  .dp-failure-info { border-left-color: #484f58; }
   .dp-title-fail { color: #f85149 !important; }
+  .dp-title-info { color: #8b949e !important; }
+  .fd-row-info td { opacity: .62; }
+  .fd-info-tag { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 3px;
+                 background: #21262d; color: #8b949e; font-size: .62rem; font-weight: 700;
+                 vertical-align: middle; white-space: nowrap; }
   .fd-scroll { overflow-x: auto; }
   .fd-table { border-collapse: collapse; font-size: .75rem; width: 100%; min-width: 520px; }
   .fd-table tbody tr { border-bottom: 1px solid #1c2333; }

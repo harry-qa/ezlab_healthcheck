@@ -93,7 +93,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   type ApiRecord  = { url: string; fetchUrl: string; method: string; status: number; time: number; note: string };
   // severity 미지정(undefined)은 FAIL로 간주 — WARN 성격의 기록에만 'WARN'을 명시한다.
   // (Slack 장애 알림이 WARN 항목을 섞어 나열하던 문제 해결: report-status.json 소비 측에서 필터)
-  type FailRecord = { step: string; type: string; lang: string; url: string; status: number; responseTime: number; symptom: string; timestamp: string; severity?: 'FAIL' | 'WARN' };
+  // INFO = 기록은 남기되 런 상태·헬스 스코어에 반영하지 않는 정보성 등급(SLOW와 동일 취급).
+  // 이지랩이 소유·수정할 수 없는 제3자 자원(외부 링크)이 여기 해당한다 — 남의 서버 장애로 우리 점수를 깎지 않는다.
+  type FailRecord = { step: string; type: string; lang: string; url: string; status: number; responseTime: number; symptom: string; timestamp: string; severity?: 'FAIL' | 'WARN' | 'INFO' };
 
   const apiRecords: ApiRecord[]  = [];
   const failRecords: FailRecord[] = [];
@@ -145,6 +147,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   let failCount = 0;
   let warnCount = 0;
   let slowCount = 0; // 느린 응답(정보성) — 런 상태(WARN)·헬스 스코어엔 반영 안 함
+  let infoCount = 0; // 제3자 자원 이상(정보성) — 런 상태·헬스 스코어엔 반영 안 함, 기록만 남김
   let shotCount = 0; // 이번 런에서 실제 캡처·첨부된 화면 수 — 리포트 안내 문구를 조건부로 내기 위함
   const serverTimes: Record<string, number> = {};
 
@@ -296,8 +299,10 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
       // 내부 링크의 실패 기준을 apiIsFail(404·5xx)과 통일한다. 401/403은 비로그인 헬스체크에서
       // 인증 게이트일 뿐 장애가 아니므로(STEP2도 동일 정책) 내부라도 FAIL로 보지 않는다.
       const authGated = status === 401 || status === 403;
+      // 외부 링크 이상은 INFO(정보성) — 이지랩이 소유·수정할 수 없는 제3자 서버라 헬스 스코어에서 뺀다.
+      // (abr.ge 등 외부 도메인의 500/504가 이지랩 점수를 깎던 문제. 링크 유효성 기록 자체는 그대로 남는다)
       const result =
-        status !== 200 ? (isInternal ? (apiIsFail(status) ? 'FAIL' : 'PASS') : 'WARN') :
+        status !== 200 ? (isInternal ? (apiIsFail(status) ? 'FAIL' : 'PASS') : 'INFO') :
         contentIssue   ? 'FAIL' :
         isSlow         ? 'SLOW' : 'PASS';  // 내부/외부 공통: 느림은 정보성(SLOW) — 스코어 미반영
 
@@ -324,13 +329,13 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
       } else if (result === 'SLOW') {
         slowCount++;  // 정보성 집계만 — 런 상태(WARN)/헬스 스코어를 깎지 않고 CI도 실패시키지 않음
         console.log(`[SLOW][${type}][${lang}] ${status} (${responseTime}ms) ${cleanUrl}`);
-      } else if (result === 'WARN') {
-        // 기록 없이 warnCount만 올리면 런은 노란불인데 대시보드엔 아무 흔적이 없어
-        // 나중에 원인을 되짚을 수 없다 → WARN도 반드시 근거를 남긴다.
-        warnCount++;
+      } else if (result === 'INFO') {
+        // 스코어엔 안 넣되 기록은 반드시 남긴다 — 외부 링크가 죽은 게 이지랩 장애는 아니어도
+        // 사용자는 깨진 링크를 밟게 되므로, 링크를 교체·제거할 근거는 대시보드에 남아야 한다.
+        infoCount++;
         const ts = kstNow();
-        console.log(`[WARN][${type}][${lang}] ${status} (${responseTime}ms) [외부링크] ${cleanUrl}`);
-        failRecords.push({ step: 'UI/링크', type: '외부링크', lang, url: cleanUrl, status, responseTime, symptom: `외부 링크 응답 이상 (HTTP ${status})`, timestamp: ts, severity: 'WARN' });
+        console.log(`[INFO][${type}][${lang}] ${status} (${responseTime}ms) [외부링크 · 스코어 미반영] ${cleanUrl}`);
+        failRecords.push({ step: 'UI/링크', type: '외부링크', lang, url: cleanUrl, status, responseTime, symptom: `외부 링크 응답 이상 (HTTP ${status})`, timestamp: ts, severity: 'INFO' });
       } else {
         passCount++;
         console.log(`[PASS][${type}][${lang}] ${status} (${responseTime}ms)${isRedirect ? ' [REDIRECT]' : ''} ${cleanUrl}`);
@@ -347,10 +352,11 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
         failRecords.push({ step: 'UI/링크', type, lang, url: cleanUrl, status: 0, responseTime: 0, symptom, timestamp: ts });
         expect.soft(null, `[${type}][${lang}] ${symptom} → ${cleanUrl}`).not.toBeNull();
       } else {
-        warnCount++;
+        // 외부 도메인 접속 불가도 위 응답 이상과 동일하게 INFO — 제3자 서버 상태는 스코어에 반영하지 않는다.
+        infoCount++;
         const ts = kstNow();
-        console.log(`[WARN][${type}][${lang}] 외부링크 접속 불가: ${cleanUrl}`);
-        failRecords.push({ step: 'UI/링크', type: '외부링크', lang, url: cleanUrl, status: 0, responseTime: 0, symptom: '외부 링크 접속 불가 / 타임아웃', timestamp: ts, severity: 'WARN' });
+        console.log(`[INFO][${type}][${lang}] 외부링크 접속 불가 (스코어 미반영): ${cleanUrl}`);
+        failRecords.push({ step: 'UI/링크', type: '외부링크', lang, url: cleanUrl, status: 0, responseTime: 0, symptom: '외부 링크 접속 불가 / 타임아웃', timestamp: ts, severity: 'INFO' });
       }
     }
   }
@@ -1250,7 +1256,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   // ══════════════════════════════════════════════════════════════════
   // 최종 요약 + 배지용 JSON 저장
   // ══════════════════════════════════════════════════════════════════
-  const totalCount = passCount + failCount + warnCount + slowCount;
+  const totalCount = passCount + failCount + warnCount + slowCount + infoCount;
   const status = failCount > 0 ? 'FAIL' : warnCount > 0 ? 'WARN' : 'PASS';
   const color = failCount > 0 ? 'red' : warnCount > 0 ? 'yellow' : 'brightgreen';
   const checkTime = kstNow();
@@ -1267,8 +1273,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
     `소요 시간 : ${duration}초`,
     sep2,
     '[전체 결과]',
-    `  PASS ${passCount}  /  FAIL ${failCount}  /  WARN ${warnCount}  /  SLOW ${slowCount}  /  TOTAL ${totalCount}`,
+    `  PASS ${passCount}  /  FAIL ${failCount}  /  WARN ${warnCount}  /  SLOW ${slowCount}  /  INFO ${infoCount}  /  TOTAL ${totalCount}`,
     `  ※ SLOW(${SLOW_MS / 1000}초 초과 응답)는 정보성 지표 — 헬스 스코어에 반영되지 않음`,
+    `  ※ INFO(외부 링크 등 제3자 자원 이상)도 정보성 지표 — 헬스 스코어에 반영되지 않음`,
     `  ※ 간헐 회복 ${intermittentRecoveries.length}건 — ${INTERMITTENT_WARN_THRESHOLD}건 이상일 때만 WARN 승격`,
     sep2,
     '[점검 범위]',
@@ -1288,10 +1295,18 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
     `  STEP 9 · SSL 인증서 만료 점검 (ezlab.im / ezdown.kr)`,
   ];
 
+  // 스코어에 반영되는 기록(FAIL/WARN)과 정보성 기록(INFO)을 구분한다.
+  // 전건이 INFO면 런은 PASS인데 제목만 '장애 항목'이라 리포트를 읽는 사람이 장애로 오해한다.
+  const scoredRecords = failRecords.filter(r => r.severity !== 'INFO');
+
   if (failRecords.length > 0) {
     const affectedTypes = [...new Set(failRecords.map(r => r.type))].join(', ');
     summaryLines.push(sep2);
-    summaryLines.push(`[장애 항목]  영향 범위: ${affectedTypes}`);
+    summaryLines.push(
+      scoredRecords.length > 0
+        ? `[장애 항목]  영향 범위: ${affectedTypes}`
+        : `[참고 항목]  스코어 미반영(외부 자원)  ·  영향 범위: ${affectedTypes}`
+    );
     failRecords.forEach((r, i) => {
       summaryLines.push('');
       summaryLines.push(`  [${i + 1}] ${r.step}  |  ${r.type}  |  언어: ${r.lang}`);
@@ -1312,7 +1327,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   });
 
   // ── 장애 리포트 (FAIL/WARN 있을 때 개발팀 전달용) ───────────────
-  if (failRecords.length > 0) {
+  // INFO만 있는 런(외부 링크만 이상)은 이지랩 장애가 아니므로 개발팀 전달용 리포트를 만들지 않는다.
+  // 기록 자체는 위 '전체 점검 요약'의 [참고 항목]과 대시보드에 남는다.
+  if (scoredRecords.length > 0) {
     const affectedTypes = [...new Set(failRecords.map(r => r.type))].join(', ');
     const failLines = failRecords.map((r, i) => [
       `[${i + 1}] ${r.step}  |  유형: ${r.type}  |  언어: ${r.lang}`,
@@ -1348,6 +1365,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
       '[장애 요약]',
       `  총 FAIL   : ${failCount}건`,
       `  총 WARN   : ${warnCount}건`,
+      `  총 INFO   : ${infoCount}건 (외부 자원 — 스코어 미반영)`,
       `  영향 범위 : ${affectedTypes}`,
       sep2,
       '[장애 상세]',
@@ -1355,7 +1373,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
       failLines,
       '',
       sep2,
-      `전체 결과  : PASS ${passCount} / FAIL ${failCount} / WARN ${warnCount} / SLOW ${slowCount} / TOTAL ${totalCount}`,
+      `전체 결과  : PASS ${passCount} / FAIL ${failCount} / WARN ${warnCount} / SLOW ${slowCount} / INFO ${infoCount} / TOTAL ${totalCount}`,
       shotCount > 0
         ? `※ 실패/경고 시점 화면 ${shotCount}건이 이 리포트 첨부 파일에 있습니다.`
         : '※ 이번 런은 캡처된 화면이 없습니다 (인증서·외부링크 등 열린 페이지가 없는 네트워크성 경고).',
@@ -1371,7 +1389,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   const badgeData = {
     schemaVersion: 1,
     label: '헬스체크',
-    message: `${status} (${passCount}P/${failCount}F/${warnCount}W/${slowCount}S)`,
+    message: `${status} (${passCount}P/${failCount}F/${warnCount}W/${slowCount}S/${infoCount}I)`,
     color,
     lastChecked: new Date().toISOString(),
   };
@@ -1382,13 +1400,15 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   });
 
   // 인덱스 페이지 상태 배지용 파일 저장
-  // 최대 20건 보존 — WARN이 많은 런에서 FAIL이 잘려 Slack 장애 알림 목록이 비지 않도록 FAIL을 앞에 둔다.
+  // 최대 20건 보존 — WARN/INFO가 많은 런에서 FAIL이 잘려 Slack 장애 알림 목록이 비지 않도록
+  // 심각도 순(FAIL → WARN → INFO)으로 정렬해 잘림이 항상 낮은 등급부터 일어나게 한다.
   fs.writeFileSync('report-status.json', JSON.stringify({
-    status, passCount, failCount, warnCount, slowCount, serverTimes,
+    status, passCount, failCount, warnCount, slowCount, infoCount, serverTimes,
     certs: certResults,
     failures: [
-      ...failRecords.filter(f => f.severity !== 'WARN'),
+      ...failRecords.filter(f => f.severity !== 'WARN' && f.severity !== 'INFO'),
       ...failRecords.filter(f => f.severity === 'WARN'),
+      ...failRecords.filter(f => f.severity === 'INFO'),
     ].slice(0, 20),
   }));
 
@@ -1397,7 +1417,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page, req
   console.log(`  페이지/링크: ${visitedUrls.size}개`);
   console.log(`  이미지: ${checkedImageUrls.size}개`);
   console.log(`  API: ${apiRecords.length}개`);
-  console.log(`  결과: PASS ${passCount} / FAIL ${failCount} / WARN ${warnCount} / SLOW ${slowCount} / TOTAL ${totalCount}`);
+  console.log(`  결과: PASS ${passCount} / FAIL ${failCount} / WARN ${warnCount} / SLOW ${slowCount} / INFO ${infoCount} / TOTAL ${totalCount}`);
   console.log(`  상태: ${status}`);
   console.log(`${'═'.repeat(60)}\n`);
 });
