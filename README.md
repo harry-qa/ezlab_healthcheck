@@ -139,6 +139,24 @@ GitHub Pages에서 누적 실행 이력을 다크모드 대시보드로 확인�
 
 ## 5. 자동 실행 · 데이터 보존 · 알림
 
+### 운영 런과 검증 런 분리
+
+**운영 이력·GitHub Pages·Slack·GitHub Issue 는 `main` 브랜치의 정기 스케줄 실행에서만 갱신됩니다.**
+
+```yaml
+IS_PRODUCTION_RUN: ${{ github.event_name == 'schedule' && github.ref == 'refs/heads/main' }}
+```
+
+| 실행 | 테스트 | 리포트 artifact | 상태 이력·Pages | Slack·Issue |
+|---|:---:|:---:|:---:|:---:|
+| main 정기 스케줄 | O | O | **O** | **O** |
+| main 수동 실행 | O | O | X | X |
+| 브랜치 실행 | O | O | X | X |
+
+분리 전에는 브랜치·수동 검증 실행이 `statuses.json` 에 그대로 쌓여 가동률을 왜곡하고, 누적된 FAIL이 임계를 넘겨 **실제 장애가 아닌데도 Slack 알림이 발송**됐습니다. 검증 런은 이제 `verification-report` 아티팩트(리포트 JSON·API 관측·Playwright 리포트)로만 결과를 남깁니다.
+
+
+
 - **실행 주기**: GitHub Actions 스케줄(매시 17·47분, `17,47 * * * *` — 30분 주기, 장애 최대 ~30분 내 감지. 정시 러시를 피해 드랍·지연 최소화) + 수동 실행(`workflow_dispatch`)
   > GitHub 무료 플랜 특성상 일부 정시 실행은 지연/누락되어, 실제 기록 횟수는 명목 주기보다 적을 수 있습니다.
 - **데이터 보존**
