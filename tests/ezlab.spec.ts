@@ -174,6 +174,19 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
 
   // ── 서비스 도구 페이지 (STEP 3 크롤링에서 자동 수집) ────────────
   const discoveredToolUrls = new Set<string>();
+  // STEP5(메인 페이지 방문)에서 수집한 도구 URL — STEP4가 크롤에 의존하지 않게 하는 근거.
+  // 크롤이 나중에 추가로 발견하면 그건 STEP5가 놓친 것이므로 커버리지 누락으로 기록한다.
+  const toolUrlsFromMain = new Set<string>();
+  const TOOL_URL_RE = /\/(ko|en|jp|tw)\/tool\/[^/?#]+\/?($|[?#])/;
+
+  // 변경 전후 비교용 계측
+  const stepTimings: { step: string; ms: number }[] = [];
+  // STEP 경계에 시각만 찍고 마지막에 구간을 계산한다 — test.step 구조를 감싸지 않아 안전하다.
+  const stepMarks: { step: string; at: number }[] = [];
+  const stepMark = (name: string) => stepMarks.push({ step: name, at: Date.now() });
+  const crawlStats = { pagesCompleted: 0, linksChecked: 0, truncated: false, budgetMs: 0 };
+  const step4Stats = { discoveredFromMain: 0, discoveredFromCrawl: 0, verified: 0, skipped: 0,
+                       languagesFound: [] as string[], languagesMissing: [] as string[] };
 
   // ── 언어별 핵심 콘텐츠 키워드 ───────────────────────────────────
   // 실제 페이지 기준으로 확인된 키워드만 사용
@@ -254,9 +267,8 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
 
   // ── 결과 카운터 (배지용) ────────────────────────────────────────
   const testStartTime = Date.now();
-  // 주의: STEP3 시작 기준이 아니라 '테스트 시작 기준 절대 7분'이다(Date.now() - testStartTime 비교).
-  // 앞 STEP이 오래 걸리면 크롤에 실제로 주어지는 시간은 7분보다 짧아진다.
-  const CRAWL_DEADLINE_MS = 7 * 60 * 1000; // 크롤 중단 시점 (테스트 시작 기준 절대값)
+  // 크롤은 실행 순서상 마지막이라 '남은 예산 전부'를 쓴다. 별도 마감 상수를 두지 않고
+  // 전체 안전 예산(REPORT_SAFETY_MS)에서 끝낸다 — 핵심 검사는 이미 앞에서 끝나 있다.
   const REPORT_SAFETY_MS  = 8.5 * 60 * 1000; // 이 시점을 넘기면 이후 반복 항목은 스킵 — 최종 리포트 저장 보장
 
   // 전체 test 타임아웃(10분)에 걸리면 report-status.json이 아예 안 써지고 런이 UNKNOWN으로 잡혀
@@ -732,6 +744,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   // ══════════════════════════════════════════════════════════════════
   // STEP 1: 다국어 서버 생존 확인
   // ══════════════════════════════════════════════════════════════════
+  stepMark('STEP 1');
   await test.step('STEP 1 · 다국어 서버 생존 확인 (ko / en / jp / tw)', async () => {
     // 언어 간 연결을 재사용하는 keep-alive 에이전트 (전부 동일 호스트라 핸드셰이크 1회면 충분).
     const agent = new https.Agent({ keepAlive: true, maxSockets: 1 });
@@ -793,6 +806,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   // ══════════════════════════════════════════════════════════════════
   // STEP 2: API 자동 수집 및 검증 (네트워크 인터셉트)
   // ══════════════════════════════════════════════════════════════════
+  stepMark('STEP 2');
   await test.step('STEP 2 · API 자동 수집 및 검증 (네트워크 인터셉트)', async () => {
 
     // request 시작 시간을 Map으로 정확히 추적 (_startTime private 접근 제거)
@@ -1009,312 +1023,6 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   });
 
   // ══════════════════════════════════════════════════════════════════
-  // STEP 3: UI 링크 전수조사 (내부/외부 분리)
-  // ══════════════════════════════════════════════════════════════════
-  await test.step('STEP 3 · UI 링크 전수조사 (ko / en / jp / tw)', async () => {
-    // 크롤이 시간 예산에 걸려 잘리면 '점검 안 한 링크'가 생기는데, 기존엔 조용히 끝나서
-    // 리포트가 '이상 없음'으로 보였다. 잘렸다는 사실 자체를 한 번은 남긴다.
-    let crawlTruncated = false;
-    for (const lang of languages) {
-      await test.step(`[${lang}] <a> 링크 수집 및 점검 (depth 2)`, async () => {
-        const crawledPages = new Set<string>();
-        const termPagesFound = new Set<string>(); // depth 무관하게 term 페이지 수집
-
-        async function crawlPage(pageUrl: string, depth: number) {
-          // 전체 test 타임아웃(10분) 전에 크롤을 자진 종료 — 크롤이 밀려 최종 리포트
-          // 저장까지 못 가는 상황 방지. 예산 초과 시 남은 링크는 스킵하고 정상 종료.
-          if (Date.now() - testStartTime > CRAWL_DEADLINE_MS) { crawlTruncated = true; return; }
-          const cleanUrl = pageUrl.split('?')[0];
-          if (crawledPages.has(cleanUrl)) return;
-          crawledPages.add(cleanUrl);
-
-          try {
-            await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-            await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-            await page.waitForTimeout(500);
-          } catch {
-            // 기존엔 로그만 남기고 조용히 빠졌다. 그러면 진입점(depth 0)이 실패했을 때
-            // 그 언어의 크롤이 통째로 사라지는데 카운터·리포트엔 흔적이 없어(미탐),
-            // '점검했는데 아무 문제 없음'과 '아예 점검을 못 함'이 구분되지 않았다.
-            warnCount++;
-            const ts = kstNow();
-            const symptom = depth === 0
-              ? `크롤 진입점 렌더 실패 — [${lang}] 링크 전수조사 미실행`
-              : `크롤 대상 페이지 렌더 실패 (depth ${depth}) — 하위 링크 미점검`;
-            console.log(`[WARN][크롤][${lang}][depth${depth}] ${symptom}: ${pageUrl} @ ${ts}`);
-            await recordIssue({ step: 'STEP3·크롤', type: '크롤', lang, url: cleanUrl, status: 0, responseTime: 0, symptom, timestamp: ts, severity: 'WARN' }, { visual: true, label: `실패_크롤_${lang}_depth${depth}` });
-            return;
-          }
-
-          const internalToFollow: string[] = [];
-          try {
-            const links = await page.locator('a').all();
-            console.log(`[INFO][${lang}][depth${depth}] ${pageUrl} → ${links.length}개 링크 발견`);
-
-            for (const link of links) {
-              // 링크 단위로도 예산 확인 — 링크가 많은 페이지에서 데드라인을 넘겨도
-              // 페이지 진입 시점 체크만으론 못 멈추므로 여기서 끊는다.
-              if (Date.now() - testStartTime > CRAWL_DEADLINE_MS) { crawlTruncated = true; break; }
-              const rawUrl = await link.getAttribute('href');
-              if (!rawUrl || rawUrl.startsWith('#') || rawUrl.startsWith('javascript:') || rawUrl.startsWith('mailto:')) continue;
-              if (/\.(exe|apk|zip|dmg|msi|pkg)$/i.test(rawUrl)) continue; // 다운로드 파일 스킵
-
-              // 현재 페이지 기준으로 상대경로를 정확히 해석 — 루트 기준 강제 결합 시
-              // href="sub/page" 류가 잘못된 URL이 되어 404 오탐이 날 수 있다.
-              const parsed = (() => { try { return new URL(rawUrl, pageUrl); } catch { return null; } })();
-              if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) continue; // tel: 등 비HTTP 스킴 스킵
-              parsed.hash = ''; // #fragment만 다른 동일 페이지 중복 점검 방지
-              const url = parsed.href;
-
-              const isInternal = parsed.origin === baseUrl;
-              await checkUrl('UI', lang, url, isInternal);
-
-              if (isInternal) {
-                if (depth < 1) internalToFollow.push(url);
-                if (url.includes('/term/')) termPagesFound.add(url.split('?')[0]);
-                // trailing slash·쿼리·해시가 붙은 tool 링크도 STEP4 대상에 포함 —
-                // 기존 `[^/]+$`는 /ko/tool/ezcapture/ (슬래시로 끝) 를 놓쳐 해당 다운로드 페이지가 미점검됐다.
-                if (url.match(/\/(ko|en|jp|tw)\/tool\/[^/?#]+\/?($|[?#])/)) discoveredToolUrls.add(url.split('?')[0]);
-              }
-            }
-          } catch {
-            // 링크 수집이 중간에 끊기면 그 페이지의 나머지 링크는 점검되지 않은 채 넘어간다 → 기록 필요.
-            warnCount++;
-            const ts = kstNow();
-            const symptom = '링크 수집 중 예외 — 해당 페이지의 잔여 링크 미점검';
-            console.log(`[WARN][크롤][${lang}][depth${depth}] ${symptom}: ${pageUrl} @ ${ts}`);
-            await recordIssue({ step: 'STEP3·크롤', type: '크롤', lang, url: cleanUrl, status: 0, responseTime: 0, symptom, timestamp: ts, severity: 'WARN' }, { visual: true, label: `실패_크롤_${lang}_depth${depth}` });
-          }
-
-          for (const nextUrl of internalToFollow) {
-            await crawlPage(nextUrl, depth + 1);
-          }
-        }
-
-        await crawlPage(`${baseUrl}/${lang}`, 0);
-
-        // depth 무관하게 발견된 term 페이지에서 탭 버튼 클릭으로 숨겨진 URL 감지
-        for (const termUrl of termPagesFound) {
-          if (Date.now() - testStartTime > CRAWL_DEADLINE_MS) { crawlTruncated = true; break; } // 크롤 예산 공유
-          if (crawledPages.has(termUrl)) continue;
-          crawledPages.add(termUrl);
-          try {
-            await page.goto(termUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-            await page.waitForSelector('button.flex-1', { timeout: 5000 }).catch(() => {});
-            const tabCount = await page.locator('button.flex-1').count();
-            for (let i = 0; i < tabCount; i++) {
-              try {
-                const currentUrl = page.url().split('?')[0];
-                await page.locator('button.flex-1').nth(i).click({ timeout: 3000 });
-                await page.waitForTimeout(500);
-                const newUrl = page.url().split('?')[0];
-                if (newUrl !== currentUrl && newUrl.startsWith(baseUrl)) {
-                  console.log(`[INFO][${lang}][tab] 버튼 클릭으로 발견된 URL: ${newUrl}`);
-                  await checkUrl('UI', lang, newUrl, true);
-                  await page.goto(termUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
-                  await page.waitForSelector('button.flex-1', { timeout: 5000 }).catch(() => {});
-                }
-              } catch {
-                // 클릭 불가한 버튼은 무시
-              }
-            }
-          } catch {
-            console.log(`[SKIP][${lang}][tab] term 페이지 진입 실패: ${termUrl}`);
-          }
-        }
-      });
-    }
-
-    // 크롤이 잘렸다는 사실을 리포트에 한 번 남긴다. 이게 없으면 '점검해서 문제없음'과
-    // '시간이 없어 점검을 덜 함'이 리포트에서 똑같이 초록불로 보인다.
-    if (crawlTruncated) {
-      warnCount++;
-      // 크롤 중단도 '점검이 축소된' 것이므로 반드시 미완주로 잡아야 한다.
-      // 예전엔 WARN 기록만 남기고 truncatedSteps 에 넣지 않아, 크롤이 통째로 잘려도
-      // 다른 STEP만 끝나면 coverageComplete=true 로 보고됐다(미탐).
-      truncatedSteps.add('STEP3·크롤');
-      const ts = kstNow();
-      const symptom = `크롤 시간 예산(${CRAWL_DEADLINE_MS / 60000}분) 초과로 링크 전수조사가 중단됨 — 미점검 링크 있음`;
-      console.log(`[WARN][크롤] ${symptom} @ ${ts}`);
-      await recordIssue({ step: 'STEP3·크롤', type: '크롤', lang: '-', url: baseUrl, status: 0, responseTime: 0, symptom, timestamp: ts, severity: 'WARN' });
-    }
-  });
-
-  // ══════════════════════════════════════════════════════════════════
-  // STEP 4: 서비스별 다운로드 링크 직접 검증 (STEP 3에서 자동 수집)
-  // ══════════════════════════════════════════════════════════════════
-  await test.step('STEP 4 · 서비스별 다운로드 페이지 직접 검증', async () => {
-    const toolTargets = [...discoveredToolUrls].map(url => ({
-      name: url.split('/').pop() ?? url,
-      url,
-    }));
-    console.log(`[INFO] STEP 4 대상 서비스 페이지 ${toolTargets.length}개 자동 수집: ${toolTargets.map(t => t.name).join(', ')}`);
-    for (const target of toolTargets) {
-      // 4개 언어 확장으로 대상이 최대 24개 — 사이트가 느린 날 전체 타임아웃(10분)을 넘겨
-      // 최종 리포트 저장이 날아가지 않도록, 안전 시점 이후엔 남은 항목을 스킵한다.
-      if (budgetHit('STEP4·다운로드')) {
-        console.log(`[SKIP][다운로드] 시간 예산 초과 — 이후 항목 건너뜀 (리포트 저장 보장)`);
-        break;
-      }
-      await test.step(`[다운로드][${target.name}]`, async () => {
-        const tlang = target.url.match(/\/(ko|en|jp|tw)\//)?.[1] ?? 'ko'; // URL에서 언어 추출 (ko 고정 제거)
-        try {
-          visitedUrls.add(target.url); // 최종 집계에 포함
-          // 간헐 오리진 404/타임아웃 오탐 방지: 실패 시 짧은 백오프로 재확인 후 판정
-          const nav = await gotoWithRetry(target.url);
-          const responseTime = nav.responseTime;
-          const status = nav.status;
-
-          // 재시도로 회복된 항목(간헐)은 페이지가 살아있으므로 즉시 WARN을 매기지 않는다.
-          // STEP 3(checkUrl)은 같은 상황을 PASS + 메모로 처리하는데 여기만 WARN이면 판정이 어긋나고,
-          // 무엇보다 대상이 20여 개라 건당 1%대 확률만으로도 런 5개 중 1개가 노란불이 된다.
-          // → 일단 모아두고, 한 런에 임계치 이상 몰릴 때만 아래 '간헐 회복 종합 판정'에서 WARN 승격.
-          if (status === 200 && nav.recovered) {
-            const ts = kstNow();
-            const detail = nav.failureLog.length ? ` · ${nav.failureLog.join(', ')}` : '';
-            console.log(`[INFO][다운로드][${target.name}] 간헐 실패 후 ${nav.attempts}회차 회복 (${responseTime}ms)${detail} ${target.url} @ ${ts}`);
-            intermittentRecoveries.push({ step: 'STEP4·다운로드', type: '다운로드', lang: tlang, url: target.url, status, responseTime, symptom: `간헐 실패 후 회복 (${nav.attempts}회 시도)${detail}`, timestamp: ts, severity: 'WARN' });
-          }
-
-          let hasDownloadLink = false;
-          if (status === 200) {
-            const dlLinks = await page.locator('a[href*=".exe"], a[href*=".apk"], a[href*=".zip"], a[href*="download"]').all();
-            // 다운로드 CTA가 언어별로 <button>/<a>가 아니라 btn-class <div> 등으로 렌더되는 경우가 있어
-            // (ko는 <button>, en/jp/tw는 다른 요소) 요소 종류를 넓히고 텍스트를 정규식으로 매칭 — 오탐 방지.
-            const dlButtons = await page.locator('button, a, [role="button"], [class*="btn" i], [class*="download" i]')
-              .filter({ hasText: /다운로드|download|ダウンロード|下載/i }).all();
-            hasDownloadLink = dlLinks.length > 0 || dlButtons.length > 0;
-          }
-
-          if (status !== 200) {
-            failCount++;
-            const ts = kstNow();
-            const detail = nav.failureLog.length ? ` · ${nav.failureLog.join(', ')}` : '';
-            const symptom = status === 0
-              ? `응답 없음 (${nav.attempts}회 재시도 실패)${detail}`
-              : `HTTP ${status} 응답 (${nav.attempts}회 재시도 실패)${detail}`;
-            console.log(`[FAIL][다운로드][${target.name}] ${status} (${responseTime}ms, ${nav.attempts}회 시도) ${target.url} @ ${ts}`);
-            await recordIssue({ step: 'STEP4·다운로드', type: '다운로드', lang: tlang, url: target.url, status, responseTime, symptom, timestamp: ts }, { visual: true, label: `실패_다운로드_${target.name}_${tlang}` });
-            expect.soft(status, `[다운로드][${target.name}] 페이지 응답 실패(${nav.attempts}회 재시도) → ${target.url}`).toBe(200);
-          } else if (!hasDownloadLink) {
-            warnCount++;
-            const ts = kstNow();
-            console.log(`[WARN][다운로드][${target.name}] 페이지 정상이나 다운로드 버튼 미감지 ${target.url}`);
-            await recordIssue({ step: 'STEP4·다운로드', type: '다운로드', lang: tlang, url: target.url, status, responseTime, symptom: '페이지는 정상이나 다운로드 버튼 미감지', timestamp: ts, severity: 'WARN' }, { visual: true, label: `경고_다운로드버튼미감지_${target.name}` });
-          } else {
-            passCount++;
-            console.log(`[PASS][다운로드][${target.name}] ${status} (${responseTime}ms) 다운로드 버튼 확인 ${target.url}`);
-
-            // 파일 URL은 STEP4 뒤에서 한 번에 검증한다 — 다운로드가 JS 기반이라
-            // 페이지의 <a href>로는 하나도 못 찾았고(실측 0건), 실제 URL은 /api/tools/info 가 준다.
-          }
-        } catch (e) {
-          // 접속 불가/타임아웃은 gotoWithRetry가 status 0으로 위에서 처리 —
-          // 여기는 DOM/파일 검증 중 발생한 예외만 잡는다.
-          failCount++;
-          const ts = kstNow();
-          console.log(`[ERROR][다운로드][${target.name}] 검증 중 예외: ${target.url} @ ${ts}`);
-          await recordIssue({ step: 'STEP4·다운로드', type: '다운로드', lang: tlang, url: target.url, status: 0, responseTime: 0, symptom: '검증 중 예외', timestamp: ts });
-          expect.soft(null, `[다운로드][${target.name}] 검증 중 예외 → ${target.url}`).not.toBeNull();
-        }
-      });
-    }
-  });
-
-  // ══════════════════════════════════════════════════════════════════
-  // STEP 4-1: 실제 설치 파일 URL 검증
-  // 기존 검사는 페이지의 a[href*=".exe"] 를 훑었는데, 다운로드가 JS 기반이라
-  // 실측 0건이었다 — 검사가 도는 것처럼 보이는데 커버리지가 0인 미탐 상태였다.
-  // 실제 배포 URL은 /api/tools/info 가 내려주므로 그것을 기준으로 검증한다.
-  // 파일을 실제로 내려받지 않기 위해 HEAD → (막히면) 스트리밍 Range 순으로 확인한다.
-  // ══════════════════════════════════════════════════════════════════
-  await test.step('STEP 4-1 · 설치 파일 URL 검증', async () => {
-    const fileUrls = new Set<string>();
-    for (const lang of languages) {
-      if (budgetHit('STEP4-1·파일수집')) { console.log('[SKIP][파일] 시간 예산 초과 — 이후 언어 건너뜀'); break; }
-      const infoUrl = `${baseUrl}/api/tools/info?locale=${lang}`;
-      try {
-        const res = await page.request.get(infoUrl, { headers: ownHeaders, timeout: REQUEST_TIMEOUT_MS });
-        if (!httpIsOk(res.status(), infoUrl, 'GET')) {
-          warnCount++;
-          const ts = kstNow();
-          console.log(`[WARN][파일][${lang}] 도구 정보 API 응답 이상 (${res.status()}) ${infoUrl}`);
-          await recordIssue({ step: 'STEP4-1·파일URL', type: '파일', lang, url: infoUrl, status: res.status(), responseTime: 0, symptom: `설치 파일 목록 API 응답 이상 (HTTP ${res.status()}) — 파일 검증 불가`, timestamp: ts, severity: 'WARN' });
-          continue;
-        }
-        const body = await res.text();
-        for (const m of body.matchAll(/https:\/\/[^"'\\\s]+?\.(?:exe|apk|zip|dmg|msi|pkg)/gi)) fileUrls.add(m[0]);
-      } catch {
-        warnCount++;
-        const ts = kstNow();
-        console.log(`[WARN][파일][${lang}] 도구 정보 API 접근 불가 ${infoUrl}`);
-        await recordIssue({ step: 'STEP4-1·파일URL', type: '파일', lang, url: infoUrl, status: 0, responseTime: 0, symptom: '설치 파일 목록 API 접근 불가 — 파일 검증 불가', timestamp: ts, severity: 'WARN' });
-      }
-    }
-
-    // 커버리지 0을 조용히 통과시키지 않는다 — 이게 기존 미탐의 본질이었다.
-    if (fileUrls.size === 0) {
-      warnCount++;
-      const ts = kstNow();
-      const symptom = '설치 파일 URL을 한 건도 수집하지 못함 — 파일 서버 점검 커버리지 0';
-      console.log(`[WARN][파일] ${symptom} @ ${ts}`);
-      await recordIssue({ step: 'STEP4-1·파일URL', type: '파일', lang: '-', url: `${baseUrl}/api/tools/info`, status: 0, responseTime: 0, symptom, timestamp: ts, severity: 'WARN' });
-      return;
-    }
-
-    console.log(`[INFO][파일] 설치 파일 ${fileUrls.size}건 수집 — HEAD/Range로 존재 확인`);
-    for (const fileUrl of fileUrls) {
-      if (budgetHit('STEP4-1·파일검증')) { console.log('[SKIP][파일] 시간 예산 초과 — 이후 파일 건너뜀'); break; }
-      const name = fileUrl.split('/').pop() ?? fileUrl;
-      let status = 0;
-      let note = '';
-      try {
-        // HEAD는 본문을 받지 않아 안전하다 — 1차로 여기서 판정한다.
-        const head = await page.request.head(fileUrl, { headers: ownHeaders, timeout: 8000 });
-        status = head.status();
-        if (status !== 200 && status !== 206) {
-          // HEAD를 막는 CDN(405/403)일 수 있어 Range로 재확인한다. 본문 버퍼링을 피하려고
-          // page.request.get이 아니라 스트리밍 프로브를 쓴다(206 아니면 헤더 시점에 연결 파기).
-          const probe = await probeFileRange(fileUrl, ownHeaders);
-          const rangeOk = /^bytes\s+0-0\/\d+/i.test(probe.contentRange);
-          // bytes=0-0 은 정확히 1바이트가 와야 한다. 2바이트 이상이면 서버가 Range를 제대로
-          // 지키지 않은 것이라 '앞 1바이트만 받았다'는 전제가 깨진다 → 정상으로 보지 않는다.
-          if (probe.status === 206 && rangeOk && probe.bytes === 1) {
-            status = 206;
-            note = 'Range 확인 (1B 수신)';
-          } else if (probe.status === 206) {
-            // 206인데 Content-Range가 깨졌거나 수신량이 1바이트가 아니면 파일 존재를 확인한 게 아니다.
-            status = 0;
-            note = !rangeOk ? `Content-Range 형식 이상: "${probe.contentRange || '(없음)'}"`
-                            : `206이지만 수신 바이트 ${probe.bytes} (1바이트 기대)`;
-          } else {
-            status = probe.status;
-            note = probe.note;
-          }
-        }
-      } catch (e) {
-        status = 0;
-        note = (e as Error).message.split('\n')[0].slice(0, 60);
-      }
-
-      if (status === 200 || status === 206) {
-        passCount++;
-        console.log(`[PASS][파일] ${status} ${name}${note ? ` (${note})` : ''}`);
-      } else {
-        // 설치 파일을 못 받는 것은 다운로드 기능 자체가 죽은 것 — WARN이 아니라 FAIL.
-        failCount++;
-        const ts = kstNow();
-        const symptom = status === 0
-          ? `설치 파일 접근 불가${note ? ` (${note})` : ''}`
-          : `설치 파일 응답 이상 (HTTP ${status})${note ? ` · ${note}` : ''}`;
-        console.log(`[FAIL][파일] ${status} ${fileUrl} — ${symptom} @ ${ts}`);
-        await recordIssue({ step: 'STEP4-1·파일URL', type: '파일', lang: '-', url: fileUrl, status, responseTime: 0, symptom, timestamp: ts });
-        expect.soft(status === 200 || status === 206, `[파일] ${symptom} → ${fileUrl}`).toBe(true);
-      }
-    }
-  });
-
-  // ══════════════════════════════════════════════════════════════════
   // STEP 6: 깨진 이미지 감지
   // ══════════════════════════════════════════════════════════════════
   // 이미지 URL 정규화 — Next.js 이미지 프록시(/_next/image?url=...&w=..&q=..)는 쿼리가 곧
@@ -1396,6 +1104,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   // ══════════════════════════════════════════════════════════════════
   // STEP 5: 언어별 핵심 콘텐츠 무결성 확인 (신규)
   // ══════════════════════════════════════════════════════════════════
+  stepMark('STEP 5');
   await test.step('STEP 5 · 언어별 메인 페이지 통합 점검 (콘텐츠 + 이미지)', async () => {
     for (const lang of languages) {
       if (budgetHit('STEP5·콘텐츠')) { console.log('[SKIP][콘텐츠] 시간 예산 초과 — 이후 언어 건너뜀'); break; }
@@ -1521,6 +1230,19 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
             await verifyImage(displayUrl, fetchUrl, 'meta');
           }
 
+          // 도구 페이지 URL 수집 — 추가 렌더 없이 이 방문의 DOM에서 그대로 뽑는다.
+          // 예전엔 STEP3 크롤이 채워서 STEP4가 크롤 완주에 묶여 있었다. 크롤이 잘리면
+          // 다운로드 점검이 통째로 날아가므로, 핵심 검사를 크롤보다 앞에 둘 수 있게 여기서 모은다.
+          const toolHrefs = await page.locator('a[href]').evaluateAll(
+            els => els.map(e => (e as HTMLAnchorElement).href).filter(Boolean),
+          );
+          for (const href of toolHrefs) {
+            if (!href.startsWith(baseUrl) || !TOOL_URL_RE.test(href)) continue;
+            const tool = href.split('?')[0];
+            toolUrlsFromMain.add(tool);
+            discoveredToolUrls.add(tool);
+          }
+
           // 3층: DOM <img src> — 네트워크로 요청되지 않은 지연 로딩 이미지 보완.
           const images = await page.locator('img').all();
           console.log(`[INFO][${lang}] DOM 이미지 ${images.length}개 · 메타 이미지 ${metaImgs.length}개 · 네트워크 실패 ${netFailures.length}건`);
@@ -1573,6 +1295,41 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   });
 
 
+  // ── STEP5 도구 URL 수집 커버리지 판정 ────────────────────────────
+  // STEP4가 이 결과에 의존하므로, 여기서 놓치면 다운로드 점검이 조용히 축소된다.
+  stepMark('STEP 5-1');
+  await test.step('STEP 5-1 · 도구 페이지 수집 커버리지', async () => {
+    step4Stats.discoveredFromMain = toolUrlsFromMain.size;
+    const found = new Set<string>();
+    for (const u of toolUrlsFromMain) {
+      const m = u.match(/\/(ko|en|jp|tw)\/tool\//);
+      if (m) found.add(m[1]);
+    }
+    step4Stats.languagesFound = [...found].sort();
+    step4Stats.languagesMissing = languages.filter(l => !found.has(l));
+
+    if (toolUrlsFromMain.size === 0) {
+      warnCount++;
+      truncatedSteps.add('STEP5·도구수집');
+      const ts = kstNow();
+      const symptom = '메인 페이지에서 도구 페이지 URL을 한 건도 수집하지 못함 — 다운로드 점검 커버리지 0';
+      console.log(`[WARN][도구수집] ${symptom} @ ${ts}`);
+      await recordIssue({ step: 'STEP5·도구수집', type: '다운로드', lang: '-', url: baseUrl,
+                          status: 0, responseTime: 0, symptom, timestamp: ts, severity: 'WARN' });
+    } else if (step4Stats.languagesMissing.length > 0) {
+      warnCount++;
+      truncatedSteps.add('STEP5·도구수집·언어누락');
+      const ts = kstNow();
+      const symptom = `도구 페이지가 일부 언어에서 발견되지 않음 — 누락: ${step4Stats.languagesMissing.join(', ')} (발견 ${toolUrlsFromMain.size}건)`;
+      console.log(`[WARN][도구수집] ${symptom} @ ${ts}`);
+      await recordIssue({ step: 'STEP5·도구수집', type: '다운로드', lang: step4Stats.languagesMissing.join(','),
+                          url: baseUrl, status: 0, responseTime: 0, symptom, timestamp: ts, severity: 'WARN' });
+    } else {
+      console.log(`[INFO][도구수집] 도구 페이지 ${toolUrlsFromMain.size}건 수집 (언어: ${step4Stats.languagesFound.join(', ')})`);
+    }
+  });
+
+  stepMark('STEP 6');
   await test.step('STEP 6 · 이미지 판정 집계', async () => {
     // 수집은 STEP5의 메인 페이지 방문에서 이미 끝났다(방문 통합). 여기서는 자산 단위로만 판정한다.
     // ── 자산 단위 최종 판정 ──
@@ -1619,6 +1376,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
     { lang: 'tw', buttons: ['使用 Google 登入', '使用電子郵件開始'] },
   ];
 
+  stepMark('STEP 7');
   await test.step('STEP 7 · 로그인 폼 렌더링 확인 (언어별)', async () => {
     for (const { lang, buttons } of loginChecks) {
       if (budgetHit('STEP7·로그인')) { console.log('[SKIP][로그인] 시간 예산 초과 — 이후 언어 건너뜀'); break; }
@@ -1695,6 +1453,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
     tw: ['使用評價', 'YouTube'],
   };
 
+  stepMark('STEP 8');
   await test.step('STEP 8 · 이지다운(ezdown.kr) 정보 페이지 점검', async () => {
     console.log(`[INFO] STEP 8 이지다운 점검 대상: ${languages.map(l => `${ezdownBase}/${l}/`).join(', ')}`);
     for (const lang of languages) {
@@ -1815,6 +1574,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   //   D-7 이하: FAIL(Slack·이슈로 알림 — 자동갱신이 안 됐다는 신호)
   //   D-14 이하: WARN(대시보드 조기 경고)  /  만료됨: FAIL
   // ══════════════════════════════════════════════════════════════════
+  stepMark('STEP 9');
   await test.step('STEP 9 · SSL 인증서 만료 점검 (ezlab.im / ezdown.kr)', async () => {
     const CERT_FAIL_DAYS = 7;
     const CERT_WARN_DAYS = 14;
@@ -1858,6 +1618,337 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
           certResults.push({ host, daysLeft: null, validTo: '', status: 'ERROR' });
         }
       });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // STEP 4-1: 실제 설치 파일 URL 검증
+  // 기존 검사는 페이지의 a[href*=".exe"] 를 훑었는데, 다운로드가 JS 기반이라
+  // 실측 0건이었다 — 검사가 도는 것처럼 보이는데 커버리지가 0인 미탐 상태였다.
+  // 실제 배포 URL은 /api/tools/info 가 내려주므로 그것을 기준으로 검증한다.
+  // 파일을 실제로 내려받지 않기 위해 HEAD → (막히면) 스트리밍 Range 순으로 확인한다.
+  // ══════════════════════════════════════════════════════════════════
+  stepMark('STEP 4-1');
+  await test.step('STEP 4-1 · 설치 파일 URL 검증', async () => {
+    const fileUrls = new Set<string>();
+    for (const lang of languages) {
+      if (budgetHit('STEP4-1·파일수집')) { console.log('[SKIP][파일] 시간 예산 초과 — 이후 언어 건너뜀'); break; }
+      const infoUrl = `${baseUrl}/api/tools/info?locale=${lang}`;
+      try {
+        const res = await page.request.get(infoUrl, { headers: ownHeaders, timeout: REQUEST_TIMEOUT_MS });
+        if (!httpIsOk(res.status(), infoUrl, 'GET')) {
+          warnCount++;
+          const ts = kstNow();
+          console.log(`[WARN][파일][${lang}] 도구 정보 API 응답 이상 (${res.status()}) ${infoUrl}`);
+          await recordIssue({ step: 'STEP4-1·파일URL', type: '파일', lang, url: infoUrl, status: res.status(), responseTime: 0, symptom: `설치 파일 목록 API 응답 이상 (HTTP ${res.status()}) — 파일 검증 불가`, timestamp: ts, severity: 'WARN' });
+          continue;
+        }
+        const body = await res.text();
+        for (const m of body.matchAll(/https:\/\/[^"'\\\s]+?\.(?:exe|apk|zip|dmg|msi|pkg)/gi)) fileUrls.add(m[0]);
+      } catch {
+        warnCount++;
+        const ts = kstNow();
+        console.log(`[WARN][파일][${lang}] 도구 정보 API 접근 불가 ${infoUrl}`);
+        await recordIssue({ step: 'STEP4-1·파일URL', type: '파일', lang, url: infoUrl, status: 0, responseTime: 0, symptom: '설치 파일 목록 API 접근 불가 — 파일 검증 불가', timestamp: ts, severity: 'WARN' });
+      }
+    }
+
+    // 커버리지 0을 조용히 통과시키지 않는다 — 이게 기존 미탐의 본질이었다.
+    if (fileUrls.size === 0) {
+      warnCount++;
+      const ts = kstNow();
+      const symptom = '설치 파일 URL을 한 건도 수집하지 못함 — 파일 서버 점검 커버리지 0';
+      console.log(`[WARN][파일] ${symptom} @ ${ts}`);
+      await recordIssue({ step: 'STEP4-1·파일URL', type: '파일', lang: '-', url: `${baseUrl}/api/tools/info`, status: 0, responseTime: 0, symptom, timestamp: ts, severity: 'WARN' });
+      return;
+    }
+
+    console.log(`[INFO][파일] 설치 파일 ${fileUrls.size}건 수집 — HEAD/Range로 존재 확인`);
+    for (const fileUrl of fileUrls) {
+      if (budgetHit('STEP4-1·파일검증')) { console.log('[SKIP][파일] 시간 예산 초과 — 이후 파일 건너뜀'); break; }
+      const name = fileUrl.split('/').pop() ?? fileUrl;
+      let status = 0;
+      let note = '';
+      try {
+        // HEAD는 본문을 받지 않아 안전하다 — 1차로 여기서 판정한다.
+        const head = await page.request.head(fileUrl, { headers: ownHeaders, timeout: 8000 });
+        status = head.status();
+        if (status !== 200 && status !== 206) {
+          // HEAD를 막는 CDN(405/403)일 수 있어 Range로 재확인한다. 본문 버퍼링을 피하려고
+          // page.request.get이 아니라 스트리밍 프로브를 쓴다(206 아니면 헤더 시점에 연결 파기).
+          const probe = await probeFileRange(fileUrl, ownHeaders);
+          const rangeOk = /^bytes\s+0-0\/\d+/i.test(probe.contentRange);
+          // bytes=0-0 은 정확히 1바이트가 와야 한다. 2바이트 이상이면 서버가 Range를 제대로
+          // 지키지 않은 것이라 '앞 1바이트만 받았다'는 전제가 깨진다 → 정상으로 보지 않는다.
+          if (probe.status === 206 && rangeOk && probe.bytes === 1) {
+            status = 206;
+            note = 'Range 확인 (1B 수신)';
+          } else if (probe.status === 206) {
+            // 206인데 Content-Range가 깨졌거나 수신량이 1바이트가 아니면 파일 존재를 확인한 게 아니다.
+            status = 0;
+            note = !rangeOk ? `Content-Range 형식 이상: "${probe.contentRange || '(없음)'}"`
+                            : `206이지만 수신 바이트 ${probe.bytes} (1바이트 기대)`;
+          } else {
+            status = probe.status;
+            note = probe.note;
+          }
+        }
+      } catch (e) {
+        status = 0;
+        note = (e as Error).message.split('\n')[0].slice(0, 60);
+      }
+
+      if (status === 200 || status === 206) {
+        passCount++;
+        console.log(`[PASS][파일] ${status} ${name}${note ? ` (${note})` : ''}`);
+      } else {
+        // 설치 파일을 못 받는 것은 다운로드 기능 자체가 죽은 것 — WARN이 아니라 FAIL.
+        failCount++;
+        const ts = kstNow();
+        const symptom = status === 0
+          ? `설치 파일 접근 불가${note ? ` (${note})` : ''}`
+          : `설치 파일 응답 이상 (HTTP ${status})${note ? ` · ${note}` : ''}`;
+        console.log(`[FAIL][파일] ${status} ${fileUrl} — ${symptom} @ ${ts}`);
+        await recordIssue({ step: 'STEP4-1·파일URL', type: '파일', lang: '-', url: fileUrl, status, responseTime: 0, symptom, timestamp: ts });
+        expect.soft(status === 200 || status === 206, `[파일] ${symptom} → ${fileUrl}`).toBe(true);
+      }
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // STEP 4: 서비스별 다운로드 링크 직접 검증 (STEP 3에서 자동 수집)
+  // ══════════════════════════════════════════════════════════════════
+  stepMark('STEP 4');
+  await test.step('STEP 4 · 서비스별 다운로드 페이지 직접 검증', async () => {
+    const toolTargets = [...discoveredToolUrls].map(url => ({
+      name: url.split('/').pop() ?? url,
+      url,
+    }));
+    console.log(`[INFO] STEP 4 대상 서비스 페이지 ${toolTargets.length}개 자동 수집: ${toolTargets.map(t => t.name).join(', ')}`);
+    for (const target of toolTargets) {
+      // 4개 언어 확장으로 대상이 최대 24개 — 사이트가 느린 날 전체 타임아웃(10분)을 넘겨
+      // 최종 리포트 저장이 날아가지 않도록, 안전 시점 이후엔 남은 항목을 스킵한다.
+      if (budgetHit('STEP4·다운로드')) {
+        step4Stats.skipped = toolTargets.length - step4Stats.verified;
+        console.log(`[SKIP][다운로드] 시간 예산 초과 — 이후 ${step4Stats.skipped}건 건너뜀 (리포트 저장 보장)`);
+        break;
+      }
+      step4Stats.verified++;
+      await test.step(`[다운로드][${target.name}]`, async () => {
+        const tlang = target.url.match(/\/(ko|en|jp|tw)\//)?.[1] ?? 'ko'; // URL에서 언어 추출 (ko 고정 제거)
+        try {
+          visitedUrls.add(target.url); // 최종 집계에 포함
+          // 간헐 오리진 404/타임아웃 오탐 방지: 실패 시 짧은 백오프로 재확인 후 판정
+          const nav = await gotoWithRetry(target.url);
+          const responseTime = nav.responseTime;
+          const status = nav.status;
+
+          // 재시도로 회복된 항목(간헐)은 페이지가 살아있으므로 즉시 WARN을 매기지 않는다.
+          // STEP 3(checkUrl)은 같은 상황을 PASS + 메모로 처리하는데 여기만 WARN이면 판정이 어긋나고,
+          // 무엇보다 대상이 20여 개라 건당 1%대 확률만으로도 런 5개 중 1개가 노란불이 된다.
+          // → 일단 모아두고, 한 런에 임계치 이상 몰릴 때만 아래 '간헐 회복 종합 판정'에서 WARN 승격.
+          if (status === 200 && nav.recovered) {
+            const ts = kstNow();
+            const detail = nav.failureLog.length ? ` · ${nav.failureLog.join(', ')}` : '';
+            console.log(`[INFO][다운로드][${target.name}] 간헐 실패 후 ${nav.attempts}회차 회복 (${responseTime}ms)${detail} ${target.url} @ ${ts}`);
+            intermittentRecoveries.push({ step: 'STEP4·다운로드', type: '다운로드', lang: tlang, url: target.url, status, responseTime, symptom: `간헐 실패 후 회복 (${nav.attempts}회 시도)${detail}`, timestamp: ts, severity: 'WARN' });
+          }
+
+          let hasDownloadLink = false;
+          if (status === 200) {
+            const dlLinks = await page.locator('a[href*=".exe"], a[href*=".apk"], a[href*=".zip"], a[href*="download"]').all();
+            // 다운로드 CTA가 언어별로 <button>/<a>가 아니라 btn-class <div> 등으로 렌더되는 경우가 있어
+            // (ko는 <button>, en/jp/tw는 다른 요소) 요소 종류를 넓히고 텍스트를 정규식으로 매칭 — 오탐 방지.
+            const dlButtons = await page.locator('button, a, [role="button"], [class*="btn" i], [class*="download" i]')
+              .filter({ hasText: /다운로드|download|ダウンロード|下載/i }).all();
+            hasDownloadLink = dlLinks.length > 0 || dlButtons.length > 0;
+          }
+
+          if (status !== 200) {
+            failCount++;
+            const ts = kstNow();
+            const detail = nav.failureLog.length ? ` · ${nav.failureLog.join(', ')}` : '';
+            const symptom = status === 0
+              ? `응답 없음 (${nav.attempts}회 재시도 실패)${detail}`
+              : `HTTP ${status} 응답 (${nav.attempts}회 재시도 실패)${detail}`;
+            console.log(`[FAIL][다운로드][${target.name}] ${status} (${responseTime}ms, ${nav.attempts}회 시도) ${target.url} @ ${ts}`);
+            await recordIssue({ step: 'STEP4·다운로드', type: '다운로드', lang: tlang, url: target.url, status, responseTime, symptom, timestamp: ts }, { visual: true, label: `실패_다운로드_${target.name}_${tlang}` });
+            expect.soft(status, `[다운로드][${target.name}] 페이지 응답 실패(${nav.attempts}회 재시도) → ${target.url}`).toBe(200);
+          } else if (!hasDownloadLink) {
+            warnCount++;
+            const ts = kstNow();
+            console.log(`[WARN][다운로드][${target.name}] 페이지 정상이나 다운로드 버튼 미감지 ${target.url}`);
+            await recordIssue({ step: 'STEP4·다운로드', type: '다운로드', lang: tlang, url: target.url, status, responseTime, symptom: '페이지는 정상이나 다운로드 버튼 미감지', timestamp: ts, severity: 'WARN' }, { visual: true, label: `경고_다운로드버튼미감지_${target.name}` });
+          } else {
+            passCount++;
+            console.log(`[PASS][다운로드][${target.name}] ${status} (${responseTime}ms) 다운로드 버튼 확인 ${target.url}`);
+
+            // 파일 URL은 STEP4 뒤에서 한 번에 검증한다 — 다운로드가 JS 기반이라
+            // 페이지의 <a href>로는 하나도 못 찾았고(실측 0건), 실제 URL은 /api/tools/info 가 준다.
+          }
+        } catch (e) {
+          // 접속 불가/타임아웃은 gotoWithRetry가 status 0으로 위에서 처리 —
+          // 여기는 DOM/파일 검증 중 발생한 예외만 잡는다.
+          failCount++;
+          const ts = kstNow();
+          console.log(`[ERROR][다운로드][${target.name}] 검증 중 예외: ${target.url} @ ${ts}`);
+          await recordIssue({ step: 'STEP4·다운로드', type: '다운로드', lang: tlang, url: target.url, status: 0, responseTime: 0, symptom: '검증 중 예외', timestamp: ts });
+          expect.soft(null, `[다운로드][${target.name}] 검증 중 예외 → ${target.url}`).not.toBeNull();
+        }
+      });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
+  // STEP 3: UI 링크 전수조사 (내부/외부 분리)
+  // ══════════════════════════════════════════════════════════════════
+  stepMark('STEP 3');
+  await test.step('STEP 3 · UI 링크 전수조사 (ko / en / jp / tw)', async () => {
+    // 크롤이 시간 예산에 걸려 잘리면 '점검 안 한 링크'가 생기는데, 기존엔 조용히 끝나서
+    // 리포트가 '이상 없음'으로 보였다. 잘렸다는 사실 자체를 한 번은 남긴다.
+    let crawlTruncated = false;
+    for (const lang of languages) {
+      await test.step(`[${lang}] <a> 링크 수집 및 점검 (depth 2)`, async () => {
+        const crawledPages = new Set<string>();
+        const termPagesFound = new Set<string>(); // depth 무관하게 term 페이지 수집
+
+        async function crawlPage(pageUrl: string, depth: number) {
+          // 전체 test 타임아웃(10분) 전에 크롤을 자진 종료 — 크롤이 밀려 최종 리포트
+          // 저장까지 못 가는 상황 방지. 예산 초과 시 남은 링크는 스킵하고 정상 종료.
+          if (outOfBudget()) { crawlTruncated = true; return; }
+          const cleanUrl = pageUrl.split('?')[0];
+          if (crawledPages.has(cleanUrl)) return;
+          crawledPages.add(cleanUrl);
+
+          try {
+            await page.goto(pageUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+            crawlStats.pagesCompleted++;
+            await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+            await page.waitForTimeout(500);
+          } catch {
+            // 기존엔 로그만 남기고 조용히 빠졌다. 그러면 진입점(depth 0)이 실패했을 때
+            // 그 언어의 크롤이 통째로 사라지는데 카운터·리포트엔 흔적이 없어(미탐),
+            // '점검했는데 아무 문제 없음'과 '아예 점검을 못 함'이 구분되지 않았다.
+            warnCount++;
+            const ts = kstNow();
+            const symptom = depth === 0
+              ? `크롤 진입점 렌더 실패 — [${lang}] 링크 전수조사 미실행`
+              : `크롤 대상 페이지 렌더 실패 (depth ${depth}) — 하위 링크 미점검`;
+            console.log(`[WARN][크롤][${lang}][depth${depth}] ${symptom}: ${pageUrl} @ ${ts}`);
+            await recordIssue({ step: 'STEP3·크롤', type: '크롤', lang, url: cleanUrl, status: 0, responseTime: 0, symptom, timestamp: ts, severity: 'WARN' }, { visual: true, label: `실패_크롤_${lang}_depth${depth}` });
+            return;
+          }
+
+          const internalToFollow: string[] = [];
+          try {
+            const links = await page.locator('a').all();
+            console.log(`[INFO][${lang}][depth${depth}] ${pageUrl} → ${links.length}개 링크 발견`);
+
+            for (const link of links) {
+              // 링크 단위로도 예산 확인 — 링크가 많은 페이지에서 데드라인을 넘겨도
+              // 페이지 진입 시점 체크만으론 못 멈추므로 여기서 끊는다.
+              if (outOfBudget()) { crawlTruncated = true; break; }
+              const rawUrl = await link.getAttribute('href');
+              if (!rawUrl || rawUrl.startsWith('#') || rawUrl.startsWith('javascript:') || rawUrl.startsWith('mailto:')) continue;
+              if (/\.(exe|apk|zip|dmg|msi|pkg)$/i.test(rawUrl)) continue; // 다운로드 파일 스킵
+
+              // 현재 페이지 기준으로 상대경로를 정확히 해석 — 루트 기준 강제 결합 시
+              // href="sub/page" 류가 잘못된 URL이 되어 404 오탐이 날 수 있다.
+              const parsed = (() => { try { return new URL(rawUrl, pageUrl); } catch { return null; } })();
+              if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) continue; // tel: 등 비HTTP 스킴 스킵
+              parsed.hash = ''; // #fragment만 다른 동일 페이지 중복 점검 방지
+              const url = parsed.href;
+
+              const isInternal = parsed.origin === baseUrl;
+              await checkUrl('UI', lang, url, isInternal);
+              crawlStats.linksChecked++;
+
+              if (isInternal) {
+                if (depth < 1) internalToFollow.push(url);
+                if (url.includes('/term/')) termPagesFound.add(url.split('?')[0]);
+                // trailing slash·쿼리·해시가 붙은 tool 링크도 STEP4 대상에 포함 —
+                // 기존 `[^/]+$`는 /ko/tool/ezcapture/ (슬래시로 끝) 를 놓쳐 해당 다운로드 페이지가 미점검됐다.
+                if (TOOL_URL_RE.test(url)) {
+                  const tool = url.split('?')[0];
+                  // STEP4는 이미 STEP5 수집분으로 끝났다. 여기서 새로 나오면 STEP5가 놓친 것이다.
+                  if (!toolUrlsFromMain.has(tool)) step4Stats.discoveredFromCrawl++;
+                  discoveredToolUrls.add(tool);
+                }
+              }
+            }
+          } catch {
+            // 링크 수집이 중간에 끊기면 그 페이지의 나머지 링크는 점검되지 않은 채 넘어간다 → 기록 필요.
+            warnCount++;
+            const ts = kstNow();
+            const symptom = '링크 수집 중 예외 — 해당 페이지의 잔여 링크 미점검';
+            console.log(`[WARN][크롤][${lang}][depth${depth}] ${symptom}: ${pageUrl} @ ${ts}`);
+            await recordIssue({ step: 'STEP3·크롤', type: '크롤', lang, url: cleanUrl, status: 0, responseTime: 0, symptom, timestamp: ts, severity: 'WARN' }, { visual: true, label: `실패_크롤_${lang}_depth${depth}` });
+          }
+
+          for (const nextUrl of internalToFollow) {
+            await crawlPage(nextUrl, depth + 1);
+          }
+        }
+
+        await crawlPage(`${baseUrl}/${lang}`, 0);
+
+        // depth 무관하게 발견된 term 페이지에서 탭 버튼 클릭으로 숨겨진 URL 감지
+        for (const termUrl of termPagesFound) {
+          if (outOfBudget()) { crawlTruncated = true; break; } // 크롤 예산 공유
+          if (crawledPages.has(termUrl)) continue;
+          crawledPages.add(termUrl);
+          try {
+            await page.goto(termUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+            await page.waitForSelector('button.flex-1', { timeout: 5000 }).catch(() => {});
+            const tabCount = await page.locator('button.flex-1').count();
+            for (let i = 0; i < tabCount; i++) {
+              try {
+                const currentUrl = page.url().split('?')[0];
+                await page.locator('button.flex-1').nth(i).click({ timeout: 3000 });
+                await page.waitForTimeout(500);
+                const newUrl = page.url().split('?')[0];
+                if (newUrl !== currentUrl && newUrl.startsWith(baseUrl)) {
+                  console.log(`[INFO][${lang}][tab] 버튼 클릭으로 발견된 URL: ${newUrl}`);
+                  await checkUrl('UI', lang, newUrl, true);
+                  await page.goto(termUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+                  await page.waitForSelector('button.flex-1', { timeout: 5000 }).catch(() => {});
+                }
+              } catch {
+                // 클릭 불가한 버튼은 무시
+              }
+            }
+          } catch {
+            console.log(`[SKIP][${lang}][tab] term 페이지 진입 실패: ${termUrl}`);
+          }
+        }
+      });
+    }
+
+    // 크롤이 잘렸다는 사실을 리포트에 한 번 남긴다. 이게 없으면 '점검해서 문제없음'과
+    // '시간이 없어 점검을 덜 함'이 리포트에서 똑같이 초록불로 보인다.
+    crawlStats.truncated = crawlTruncated;
+    // STEP4는 STEP5 수집분으로 이미 끝났다. 크롤이 뒤늦게 도구 URL을 더 찾아냈다면
+    // 그만큼 다운로드 점검이 축소된 것이므로 커버리지 누락으로 남긴다.
+    if (step4Stats.discoveredFromCrawl > 0) {
+      warnCount++;
+      truncatedSteps.add('STEP4·도구URL누락');
+      const ts = kstNow();
+      const symptom = `크롤이 도구 페이지 ${step4Stats.discoveredFromCrawl}건을 추가 발견 — STEP5 수집에서 누락돼 다운로드 점검을 못 받음`;
+      console.log(`[WARN][도구수집] ${symptom} @ ${ts}`);
+      await recordIssue({ step: 'STEP4·도구URL', type: '다운로드', lang: '-', url: baseUrl,
+                          status: 0, responseTime: 0, symptom, timestamp: ts, severity: 'WARN' });
+    }
+    if (step4Stats.skipped > 0) truncatedSteps.add('STEP4·미검증');
+    if (crawlTruncated) {
+      warnCount++;
+      // 크롤 중단도 '점검이 축소된' 것이므로 반드시 미완주로 잡아야 한다.
+      // 예전엔 WARN 기록만 남기고 truncatedSteps 에 넣지 않아, 크롤이 통째로 잘려도
+      // 다른 STEP만 끝나면 coverageComplete=true 로 보고됐다(미탐).
+      truncatedSteps.add('STEP3·크롤');
+      const ts = kstNow();
+      const symptom = `전체 시간 예산(${REPORT_SAFETY_MS / 60000}분) 초과로 링크 전수조사가 중단됨 — 미점검 링크 있음`;
+      console.log(`[WARN][크롤] ${symptom} @ ${ts}`);
+      await recordIssue({ step: 'STEP3·크롤', type: '크롤', lang: '-', url: baseUrl, status: 0, responseTime: 0, symptom, timestamp: ts, severity: 'WARN' });
     }
   });
 
@@ -1916,6 +2007,12 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   // 최종 요약 + 배지용 JSON 저장
   // ══════════════════════════════════════════════════════════════════
   const totalCount = passCount + failCount + warnCount + slowCount + infoCount;
+  // STEP 구간 계산 — 마지막 STEP은 여기까지를 소요로 본다.
+  stepMark('종료');
+  for (let i = 0; i < stepMarks.length - 1; i++) {
+    stepTimings.push({ step: stepMarks[i].step, ms: stepMarks[i + 1].at - stepMarks[i].at });
+  }
+
   // 증거 보완은 요약·장애 리포트를 만들기 '전'에 끝내야 한다.
   // 뒤에서 돌리면 리포트가 shotCount를 0으로 읽어 '캡처된 화면이 없습니다'라고 적은 뒤에
   // 실제 진단 카드가 생성돼, 리포트 내용과 아티팩트가 어긋난다.
@@ -2121,6 +2218,10 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
     })),
     apiObservationDigest,
     apiEndpointsDigest,
+    // 변경 전후 비교용 계측 — 핵심 검사 우선·크롤 마지막 재배치의 효과 추적
+    stepTimings,
+    crawlStats,
+    step4Stats,
     // 증거 없는 FAIL·WARN 이 0건이어야 한다(INFO 외부 링크는 대상 아님).
     evidenceMissing: failRecords.filter(f => f.severity !== 'INFO' && !f.evidencePath).length,
     // own/third 는 '브라우저가 낸 요청'만 센다(page.request·raw https·TLS 제외).
@@ -2134,6 +2235,10 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   console.log(`[DONE] 전체 점검 완료`);
   console.log(`  실행 ID: ${RUN_ID} · 네트워크 정책: ${NET_POLICY_ON ? 'on' : 'off'} · 차단한 beacon: ${blockedBeacons}건`);
   console.log(`  브라우저 요청: 자사 ${reqOwn} / 제3자 ${reqThird} (page.request·TTFB·인증서 요청 미포함)`);
+  console.log(`  도구 페이지: 메인 수집 ${step4Stats.discoveredFromMain} · 검증 ${step4Stats.verified}`
+    + ` · 미검증 ${step4Stats.skipped} · 크롤 추가발견 ${step4Stats.discoveredFromCrawl}`
+    + ` · 언어 ${step4Stats.languagesFound.join(',') || '-'}${step4Stats.languagesMissing.length ? ` (누락 ${step4Stats.languagesMissing.join(',')})` : ''}`);
+  console.log(`  크롤: 완료 페이지 ${crawlStats.pagesCompleted} · 링크 검증 ${crawlStats.linksChecked} · 중단 ${crawlStats.truncated}`);
   {
     const need = failRecords.filter(f => f.severity !== 'INFO');
     const miss = need.filter(f => !f.evidencePath).length;
