@@ -27,6 +27,12 @@ on:
         description: '허용 가능한 브라우저 자사 요청 증가율 (%)'
         required: false
         default: '10'
+      mode:
+        description: 'ab = 요청량 A/B 게이트 · diagnose = STEP2 대기가 API를 자르는지 일회성 진단'
+        required: false
+        default: 'ab'
+        type: choice
+        options: [ab, diagnose]
 
 # 운영 헬스체크와 동시에 돌면 서로 부하·측정에 영향을 준다 — 순차 실행.
 concurrency:
@@ -65,6 +71,7 @@ jobs:
           } | tee ab-results/env.txt
 
       - name: A/B 실행 (조건 순서를 회차마다 교차)
+        if: github.event.inputs.mode != 'diagnose'
         env:
           TZ: Asia/Seoul
         run: |
@@ -74,9 +81,9 @@ jobs:
           run_one() {   # $1=정책(off|on) $2=회차
             local policy="$1" i="$2"
             echo "::group::회차 $i · HC_NET_POLICY=$policy"
-            # 직전 조건의 리포트를 지운다 — 안 지우면 이번 실행이 리포트를 못 만들었을 때
+            # 직전 조건의 산출물을 지운다 — 안 지우면 이번 실행이 만들지 못했을 때
             # 직전 결과를 그대로 복사해 A/B가 조용히 오염된다.
-            rm -f report-status.json
+            rm -f report-status.json test-results/api-observation.json
             # 헬스체크는 실제 결함이 있으면 exit 1 이다(현재 ezdown 설치 파일 403).
             # '결함 발견'과 '미완주'는 다르므로 여기서는 종료 코드를 무시하고,
             # 아래에서 리포트 생성·완주 여부로 판정한다.
@@ -86,6 +93,13 @@ jobs:
               exit 1
             fi
             cp report-status.json "ab-results/${policy}-${i}.json"
+            # STEP2 API 관측 전수 집합도 회차별로 보존한다 — 커버리지 비교에 목록 전체가 필요하다.
+            # 없으면 그 표본은 '측정 실패'다. 경고만 남기고 넘어가면 커버리지 비교 없이 게이트가 통과한다.
+            if [ ! -f test-results/api-observation.json ]; then
+              echo "관측 파일 미생성 — 측정 실패 (정책=$policy, 회차=$i)"
+              exit 1
+            fi
+            cp test-results/api-observation.json "ab-results/${policy}-${i}-api-observation.json"
             echo "::endgroup::"
           }
 
@@ -100,17 +114,22 @@ jobs:
           done
 
       - name: 결과 판정 (게이트)
+        if: github.event.inputs.mode != 'diagnose'
         env:
           REPEATS: ${{ github.event.inputs.repeats }}
           THRESHOLD: ${{ github.event.inputs.threshold }}
         run: |
           python3 - <<'PY'
-          import glob, json, os, statistics, sys
+          import glob, json, os, re, statistics, sys
 
           repeats = int(os.environ.get('REPEATS') or 2)
           threshold = float(os.environ.get('THRESHOLD') or 10)
           rows = {'off': [], 'on': []}
-          for f in sorted(glob.glob('ab-results/*.json')):
+          # 관측 전수 파일(*-api-observation.json)도 최상위에 netPolicy 를 갖고 있어
+          # 무턱대고 glob 하면 표본 수가 두 배로 잘못 세진다 → 리포트 파일만 정확히 집는다.
+          sample_files = [f for f in sorted(glob.glob('ab-results/*.json'))
+                          if re.fullmatch(r'(off|on)-\d+\.json', os.path.basename(f))]
+          for f in sample_files:
               try:
                   d = json.load(open(f))
               except Exception as e:
@@ -127,6 +146,8 @@ jobs:
 
           # 시간 예산으로 STEP을 건너뛴 런은 요청량이 줄어 비교를 왜곡한다.
           # 증거 누락은 이번 배포의 핵심 요구라 A/B 게이트에서도 함께 막는다.
+          # 관측 파일·다이제스트가 없으면 커버리지 비교 자체가 불가능하므로 측정 실패로 본다.
+          import hashlib
           for pol, items in rows.items():
               for f, d in items:
                   if d.get('coverageComplete') is not True:
@@ -137,6 +158,20 @@ jobs:
                   elif miss != 0:
                       problems.append(f'{f}: 증거 없는 FAIL·WARN {miss}건')
 
+                  obs_path = f.replace('.json', '-api-observation.json')
+                  file_digest = d.get('apiObservationDigest')
+                  ep_digest = d.get('apiEndpointsDigest')
+                  if not file_digest:
+                      problems.append(f'{f}: apiObservationDigest 없음')
+                  if not ep_digest:
+                      problems.append(f'{f}: apiEndpointsDigest 없음')
+                  if not os.path.exists(obs_path):
+                      problems.append(f'{f}: 관측 파일 없음 ({os.path.basename(obs_path)})')
+                  elif file_digest:
+                      actual = hashlib.sha256(open(obs_path, 'rb').read()).hexdigest()[:16]
+                      if actual != file_digest:
+                          problems.append(f'{f}: 관측 파일 해시 불일치 (파일 {actual} != 리포트 {file_digest})')
+
           hdr = f"{'정책':<5}{'파일':<22}{'브라우저 자사요청':>16}{'제3자':>8}{'차단':>7}{'소요(s)':>9}{'완주':>6}{'증거누락':>9}"
           print(hdr)
           for pol in ('off', 'on'):
@@ -144,7 +179,8 @@ jobs:
                   rc = d.get('requestCounts', {})
                   print(f"{pol:<5}{os.path.basename(f):<22}{rc.get('own', 0):>16}{rc.get('third', 0):>8}"
                         f"{rc.get('blockedBeacons', 0):>7}{d.get('durationSec', 0):>9}"
-                        f"{str(d.get('coverageComplete')):>6}{d.get('evidenceMissing', '-'):>9}")
+                        f"{str(d.get('coverageComplete')):>6}{d.get('evidenceMissing', '-'):>9}"
+                        f"  ep:{d.get('apiEndpointsDigest', '-')}")
 
           if problems:
               print('\n비교 불가:')
@@ -178,6 +214,45 @@ jobs:
               print(f'\n실패 — 요청 증가 {d_req:+.1f}% 가 임계 {threshold:+.0f}% 를 초과했습니다.')
               sys.exit(1)
           print('\n통과')
+          PY
+
+      - name: 진단 실행 (STEP2 대기가 API를 자르는지)
+        if: github.event.inputs.mode == 'diagnose'
+        env:
+          TZ: Asia/Seoul
+        run: |
+          set -eu
+          mkdir -p ab-results
+          for POLICY in off on; do
+            echo "::group::진단 · HC_NET_POLICY=$POLICY"
+            HC_NET_POLICY=$POLICY node scripts/probe_api_wait.mjs "ab-results/probe-$POLICY.json"
+            echo "::endgroup::"
+          done
+
+      - name: 진단 결과 요약
+        if: github.event.inputs.mode == 'diagnose'
+        run: |
+          python3 - <<'PY'
+          import json, os
+          print(f"{'정책':<5}{'lang':<5}{'대기종료(ms)':>12}{'idle':>10}{'요청@대기':>10}{'추가요청':>9}{'엔드포인트':>11}{'신규':>6}")
+          allnew = {}
+          for pol in ('off', 'on'):
+              p = f'ab-results/probe-{pol}.json'
+              if not os.path.exists(p):
+                  print(f'  {pol}: 결과 없음'); continue
+              for r in json.load(open(p))['results']:
+                  print(f"{r['policy']:<5}{r['lang']:<5}{r['waitEndMs']:>12}{r['idleOutcome']:>10}"
+                        f"{r['requestsAtWaitEnd']:>10}{r['requestsExtra']:>9}"
+                        f"{r['endpointsAtWaitEnd']:>4}→{r['endpointsTotal']:<6}{len(r['newEndpoints']):>6}")
+                  if r['newEndpoints']:
+                      allnew.setdefault((r['policy'], r['lang']), r['newEndpoints'])
+          print('\n현재 대기가 놓치는 엔드포인트 (신규만)')
+          if not allnew:
+              print('  없음 — 관측된 15초 범위 안에서는 추가 엔드포인트가 발견되지 않음')
+          for (pol, lang), eps in sorted(allnew.items()):
+              print(f'  [{pol}/{lang}] {len(eps)}건')
+              for e in eps:
+                  print(f'    {e}')
           PY
 
       - name: 결과 아티팩트 업로드

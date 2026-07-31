@@ -42,6 +42,13 @@ jobs:
       - name: Playwright 브라우저 설치 (Chromium)
         run: npx playwright install --with-deps chromium
 
+      # 판정 규칙 테스트 — 운영 서버를 때리지 않고 수초에 끝난다.
+      # 여기서 실패하면 헬스체크 결과를 신뢰할 수 없으므로 continue-on-error 없이 즉시 중단한다.
+      - name: 판정 규칙 테스트 (운영 무관)
+        run: |
+          npx playwright test tests/judgment.spec.ts
+          python3 scripts/test_fail_streak.py
+
       - name: 테스트 실행
         run: npx playwright test tests/ezlab.spec.ts
         continue-on-error: true
@@ -80,28 +87,17 @@ jobs:
           RECENT_STATUSES=$(python3 -c "import json; d=json.load(open('/tmp/statuses.json')); ks=sorted(d,reverse=True)[:10]; print(','.join(d[k] for k in ks))" 2>/dev/null || echo "")
           echo "RECENT_STATUSES=$RECENT_STATUSES" >> $GITHUB_ENV
 
-          # 현재 런 포함 연속 FAIL 스트릭 → 이슈 생성 디바운스용 (Slack의 FAIL_ALERT_THRESHOLD=2와 동일 기준).
-          # UNKNOWN(테스트 미완주=인프라 이상)은 별도 즉시 알림 경로가 있으므로 사이트 장애 스트릭에 섞지 않는다.
-          # (섞으면 UNKNOWN 직후 단발 FAIL이 streak=2를 채워 '장애 감지'+이슈로 오승격됨 — notify_slack.py fail_streak과 일치)
-          FAIL_STREAK=$(python3 - "$CURRENT_STATUS" <<'PYEOF' 2>/dev/null || echo 0
-          import json, sys
-          cur = sys.argv[1]
-          isfail = lambda s: s == 'FAIL'
-          streak = 0
-          if isfail(cur):
-              streak = 1
-              d = json.load(open('/tmp/statuses.json'))
-              for k in sorted(d, reverse=True):
-                  if isfail(d[k]): streak += 1
-                  else: break
-          print(streak)
-          PYEOF
-          )
-          echo "FAIL_STREAK=$FAIL_STREAK" >> $GITHUB_ENV
-
           python3 scripts/update_statuses.py "$DATETIME" "$CURRENT_STATUS"
           python3 scripts/update_perf.py "$DATETIME"
           python3 scripts/update_failures.py "$DATETIME"
+
+          # 이슈 생성 디바운스용 연속 FAIL 스트릭 — Slack 알림과 반드시 같은 기준이어야 해서
+          # scripts/fail_streak.py 하나를 공유한다(횟수 + 장애 지문 누적 교집합).
+          # 지문을 안 보면 서로 다른 단발 오류 A→B 도 '연속 2회'가 돼 이슈가 생성된다.
+          # update_failures.py 뒤에서 계산해야 notify_slack.py 가 보는 이력과 동일해진다.
+          # UNKNOWN(테스트 미완주=인프라 이상)은 별도 즉시 알림 경로가 있어 사이트 장애 스트릭에 섞지 않는다.
+          FAIL_STREAK=$(python3 scripts/fail_streak.py "$CURRENT_STATUS" "$DATETIME" "$RECENT_STATUSES" 2>/dev/null || echo 0)
+          echo "FAIL_STREAK=$FAIL_STREAK" >> $GITHUB_ENV
 
           cp /tmp/statuses.json reports/statuses.json
           cp /tmp/perf-history.json reports/perf-history.json

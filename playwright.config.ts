@@ -15,9 +15,13 @@ export default defineConfig({
   testDir: './tests',
   /* Fail the build on CI if you accidentally left test.only in the source code. */
   forbidOnly: !!process.env.CI,
-  /* CI에서 1회 재시도 — 스텝 단위 재시도(gotoWithRetry 등)를 통과한 FAIL만 남기기 위한 마지막 방어선.
-     재시도 런이 report-status.json을 덮어쓰므로, 기록된 FAIL은 런 전체를 두 번 돌려도 실패한 것이다. */
-  retries: process.env.CI ? 1 : 0,
+  /* 전체 재시도 없음. 예전엔 CI에서 1회 재시도로 오탐을 걸렀는데, 그러면 오류 1건 때문에
+     9개 STEP이 통째로 다시 돌아 서버가 불안정한 시점에 요청이 두 배가 됐다(예산 가드도
+     시도별로 초기화돼 최악 8.5분 × 2회). 오탐 방어는 두 겹으로 대체한다.
+       1) STEP 단위 재시도(gotoWithRetry / refetchWithRetry)가 단발 hiccup을 이미 흡수한다.
+       2) report-status.json의 failFingerprints로 '같은 장애가 연속인지'를 판별해
+          서로 다른 단발 오류 두 개가 연속 장애로 묶이는 것을 막는다(notify_slack.py). */
+  retries: 0,
   /* 헬스체크는 단일 test라 병렬 실행 여지가 없다 — 워커 1개로 고정(fullyParallel은 무의미해 제거). */
   workers: 1,
   /* Reporter to use. See https://playwright.dev/docs/test-reporters */

@@ -19,6 +19,8 @@ report-status.json 에서 상세(failCount/warnCount/failures)를 읽는다.
 """
 import os, json, sys, time, urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 WEBHOOK = os.environ.get('SLACK_WEBHOOK_URL', '').strip()
 if not WEBHOOK:
     print('SLACK_WEBHOOK_URL 미설정 — 스킵')
@@ -114,13 +116,28 @@ for s in recent:
     else:
         break
 
+# ── 장애 지문 대조 ────────────────────────────────────────────────
+# 연속 FAIL 횟수만 보면 서로 무관한 단발 오류 두 개가 하나의 장애로 묶여 알림이 나간다.
+# (Playwright 전체 재시도를 없앤 뒤로는 단발 FAIL이 리포트에 그대로 남으므로 더 중요해졌다)
+# 계산 규칙은 GitHub 이슈 생성 게이트와 반드시 같아야 해서 scripts/fail_streak.py 한 곳에 둔다.
+from fail_streak import effective_streak as _eff_streak
+from fail_streak import previous_effective_streak as _prev_eff_streak
+
+_eff, fp_streak, _cnt = _eff_streak(cur, recent, _dt)
+
 is_fail     = cur == 'FAIL'
 is_unknown  = cur == 'UNKNOWN'                       # 테스트 미완주 — 헬스체크 자체 이상
+# 지문 대조가 가능하면 '같은 장애가 연속인지'를 기준으로 쓴다(서로 다른 단발의 오묶음 방지).
+effective_streak = _eff
 # UNKNOWN은 1회부터, FAIL은 연속 FAIL THRESHOLD회부터 알림
-down_alert  = is_unknown or (is_fail and fail_streak >= THRESHOLD)
-is_new_fail = is_fail and fail_streak == THRESHOLD   # 임계 도달 첫 알림 = '장애 감지', 이후 = '지속 중'
+down_alert  = is_unknown or (is_fail and effective_streak >= THRESHOLD)
+is_new_fail = is_fail and effective_streak == THRESHOLD  # 임계 도달 첫 알림 = '장애 감지', 이후 = '지속 중'
 # 복구: 정상 전환 && 직전 장애가 '실제로 알림된' 수준이었을 때만 — 단발 blip 자동회복은 침묵.
-prev_alerted = prev_streak >= THRESHOLD or (bool(recent) and recent[0] == 'UNKNOWN')
+# 직전 런 시점의 판정을 재현한다. 지문은 반드시 '이력'에서 읽어야 한다 —
+# 현재 런이 PASS면 report-status.json 의 지문이 비어 있어 원시 횟수로 폴백해버리고,
+# 그러면 A→B→PASS 처럼 장애 알림이 억제된 조합에도 복구 알림만 나간다.
+_prev_eff = _prev_eff_streak(recent, _dt)
+prev_alerted = (_prev_eff >= THRESHOLD) or (bool(recent) and recent[0] == 'UNKNOWN')
 is_recovery  = cur in ('PASS', 'WARN') and _down(prev) and prev_alerted
 
 # 간헐 불안정(flapping): FAIL↔PASS/WARN 교차는 연속 임계에 안 걸려 위 로직만으론 영원히 침묵한다.
@@ -182,7 +199,9 @@ elif is_fail:
     # 연속 실패 횟수를 항상 본문에 남긴다. 첫 '장애 감지' 알림의 POST가 4회 재시도까지 모두 실패해
     # 유실돼도(이후 런은 '지속 중'만 발송), 이 줄로 '몇 회째 지속'인지가 채널에 남아 시작 시점을 알 수 있다.
     lines  = [f'*FAIL {fail_c}* · WARN {warn_c} · PASS {pass_c}',
-              f'영향 범위: *{types}*', f'연속 실패: *{fail_streak}회째*']
+              f'영향 범위: *{types}*',
+              (f'연속 실패: *{fail_streak}회째* (동일 장애 {fp_streak}회 연속)'
+               if fp_streak is not None else f'연속 실패: *{fail_streak}회째*')]
     for i, fr in enumerate(fail_only[:5], 1):
         st  = fr.get('status', 0)
         st_txt = 'timeout' if not st else str(st)
