@@ -279,6 +279,43 @@ test.describe('점검 완주 판정', () => {
     expect(coverage(['STEP3·크롤']).coverageComplete).toBe(false);
   });
 
+  // 크롤은 예산 초과 말고도 '링크를 다 못 본' 경로가 셋 있다.
+  // 예전엔 렌더 실패·수집 예외가 WARN만 남기고, term 진입 실패는 WARN조차 없이 SKIP돼서
+  // 실제로 링크를 놓쳤는데도 완주로 보고됐다.
+  test.describe('크롤 불완전 경로', () => {
+    const coverageOf = (truncated: boolean, incomplete: string[]) => {
+      const steps: string[] = [];
+      if (truncated) steps.push('STEP3·크롤');
+      if (incomplete.length > 0) steps.push('STEP3·크롤불완전');
+      return { coverageComplete: steps.length === 0, skippedSteps: steps };
+    };
+
+    test('진입점 렌더 실패 → 미완주', () => {
+      expect(coverageOf(false, ['진입점렌더실패']).coverageComplete).toBe(false);
+    });
+    test('하위 페이지 렌더 실패 → 미완주', () => {
+      expect(coverageOf(false, ['페이지렌더실패']).coverageComplete).toBe(false);
+    });
+    test('링크 수집 예외 → 미완주', () => {
+      expect(coverageOf(false, ['링크수집예외']).coverageComplete).toBe(false);
+    });
+    test('term 페이지 진입 실패 → 미완주 (예전엔 조용히 SKIP)', () => {
+      expect(coverageOf(false, ['term페이지진입실패']).coverageComplete).toBe(false);
+    });
+    test('예산 초과 없이 불완전 경로만 있어도 미완주', () => {
+      const c = coverageOf(false, ['페이지렌더실패', 'term페이지진입실패']);
+      expect(c.coverageComplete).toBe(false);
+      expect(c.skippedSteps).toEqual(['STEP3·크롤불완전']);
+    });
+    test('예산 초과와 불완전이 함께면 둘 다 기록', () => {
+      const c = coverageOf(true, ['링크수집예외']);
+      expect(c.skippedSteps).toEqual(['STEP3·크롤', 'STEP3·크롤불완전']);
+    });
+    test('둘 다 없으면 완주', () => {
+      expect(coverageOf(false, []).coverageComplete).toBe(true);
+    });
+  });
+
   test('예산 초과 STEP과 크롤 중단이 함께 기록된다', () => {
     const c = coverage(['STEP3·크롤', 'STEP7·로그인', 'STEP8·이지다운', 'STEP9·인증서']);
     expect(c.coverageComplete).toBe(false);

@@ -184,7 +184,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   // STEP 경계에 시각만 찍고 마지막에 구간을 계산한다 — test.step 구조를 감싸지 않아 안전하다.
   const stepMarks: { step: string; at: number }[] = [];
   const stepMark = (name: string) => stepMarks.push({ step: name, at: Date.now() });
-  const crawlStats = { pagesCompleted: 0, linksChecked: 0, truncated: false, budgetMs: 0 };
+  // linksChecked 는 '고유 요청 수'가 아니라 checkUrl 호출 횟수다(중복 URL은 checkUrl 내부에서 스킵).
+  // budgetMs 는 값이 채워지지 않아 항상 0이었으므로 필드 자체를 뺀다 — 잘못된 값보다 없는 편이 낫다.
+  const crawlStats = { pagesCompleted: 0, linksChecked: 0, truncated: false, incomplete: [] as string[] };
   const step4Stats = { discoveredFromMain: 0, discoveredFromCrawl: 0, verified: 0, skipped: 0,
                        languagesFound: [] as string[], languagesMissing: [] as string[] };
 
@@ -1807,6 +1809,10 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
     // 크롤이 시간 예산에 걸려 잘리면 '점검 안 한 링크'가 생기는데, 기존엔 조용히 끝나서
     // 리포트가 '이상 없음'으로 보였다. 잘렸다는 사실 자체를 한 번은 남긴다.
     let crawlTruncated = false;
+    // 예산 초과(truncated) 말고도 크롤이 '링크를 다 못 본' 경로가 셋 더 있다.
+    // 렌더 실패 · 링크 수집 예외 · term 페이지 진입 실패. 예전엔 WARN만 남기거나(앞 둘)
+    // 조용히 SKIP 해서(term), 실제로 링크를 놓쳤는데도 coverageComplete=true 가 됐다.
+    const crawlIncomplete = new Set<string>();
     for (const lang of languages) {
       await test.step(`[${lang}] <a> 링크 수집 및 점검 (depth 2)`, async () => {
         const crawledPages = new Set<string>();
@@ -1831,6 +1837,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
             // '점검했는데 아무 문제 없음'과 '아예 점검을 못 함'이 구분되지 않았다.
             warnCount++;
             const ts = kstNow();
+            crawlIncomplete.add(depth === 0 ? '진입점렌더실패' : '페이지렌더실패');
             const symptom = depth === 0
               ? `크롤 진입점 렌더 실패 — [${lang}] 링크 전수조사 미실행`
               : `크롤 대상 페이지 렌더 실패 (depth ${depth}) — 하위 링크 미점검`;
@@ -1880,6 +1887,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
             // 링크 수집이 중간에 끊기면 그 페이지의 나머지 링크는 점검되지 않은 채 넘어간다 → 기록 필요.
             warnCount++;
             const ts = kstNow();
+            crawlIncomplete.add('링크수집예외');
             const symptom = '링크 수집 중 예외 — 해당 페이지의 잔여 링크 미점검';
             console.log(`[WARN][크롤][${lang}][depth${depth}] ${symptom}: ${pageUrl} @ ${ts}`);
             await recordIssue({ step: 'STEP3·크롤', type: '크롤', lang, url: cleanUrl, status: 0, responseTime: 0, symptom, timestamp: ts, severity: 'WARN' }, { visual: true, label: `실패_크롤_${lang}_depth${depth}` });
@@ -1918,7 +1926,14 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
               }
             }
           } catch {
-            console.log(`[SKIP][${lang}][tab] term 페이지 진입 실패: ${termUrl}`);
+            // 조용히 넘기면 term 탭에 숨은 링크를 통째로 못 본 채 '이상 없음'이 된다.
+            warnCount++;
+            crawlIncomplete.add('term페이지진입실패');
+            const ts = kstNow();
+            const symptom = 'term 페이지 진입 실패 — 탭으로 전환되는 숨은 링크 미점검';
+            console.log(`[WARN][${lang}][tab] ${symptom}: ${termUrl} @ ${ts}`);
+            await recordIssue({ step: 'STEP3·크롤', type: '크롤', lang, url: termUrl,
+                                status: 0, responseTime: 0, symptom, timestamp: ts, severity: 'WARN' });
           }
         }
       });
@@ -1927,6 +1942,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
     // 크롤이 잘렸다는 사실을 리포트에 한 번 남긴다. 이게 없으면 '점검해서 문제없음'과
     // '시간이 없어 점검을 덜 함'이 리포트에서 똑같이 초록불로 보인다.
     crawlStats.truncated = crawlTruncated;
+    crawlStats.incomplete = [...crawlIncomplete].sort();
+    // 예산 초과가 아니어도 링크를 다 못 봤으면 완주가 아니다.
+    if (crawlIncomplete.size > 0) truncatedSteps.add('STEP3·크롤불완전');
     // STEP4는 STEP5 수집분으로 이미 끝났다. 크롤이 뒤늦게 도구 URL을 더 찾아냈다면
     // 그만큼 다운로드 점검이 축소된 것이므로 커버리지 누락으로 남긴다.
     if (step4Stats.discoveredFromCrawl > 0) {
