@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as https from 'https';
 import * as tls from 'tls';
+import * as crypto from 'crypto';
 
 const SCREENSHOT_DIR = 'test-results/screenshots';
 fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
@@ -224,6 +225,21 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
     return `${key}|${errorClassOf(r)}`;
   }
 
+  // STEP2 대기가 API를 자르는지 확인하기 위한 순수 관측 기록 (판정에 쓰지 않는다)
+  type ApiObservation = {
+    lang: string;
+    requests: number; responses: number; failed: number;
+    endpoints: string[];                 // 'METHOD 정규화URL' 전체 집합 (상한 없음)
+    firstRequestMs: number | null;       // 모든 시각은 navigationStartedAt 기준
+    lastRequestMs: number | null;
+    lastSettledMs: number | null;
+    inFlightAtWaitEnd: number;           // 대기 종료 '시점'에 고정
+    networkIdle: 'not-run' | 'resolved' | 'timeout' | 'error';  // 대기가 실행되지 않으면 not-run
+    gotoMs: number; networkIdleWaitMs: number; settleWaitMs: number; totalMs: number;
+    navStartedAt: number;                // 이 언어의 navigation 시작 시각 (상대 시각 계산 기준)
+  };
+  let apiObservation: ApiObservation[] = [];
+
   const apiRecords: ApiRecord[]  = [];
   const failRecords: FailRecord[] = [];
   // SSL 인증서 스냅샷 — PASS 포함 전 호스트를 담아 report-status.json에 저장한다.
@@ -238,7 +254,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
 
   // ── 결과 카운터 (배지용) ────────────────────────────────────────
   const testStartTime = Date.now();
-  const CRAWL_DEADLINE_MS = 7 * 60 * 1000; // STEP 3 크롤 시간 예산 (전체 10분 타임아웃 방어)
+  // 주의: STEP3 시작 기준이 아니라 '테스트 시작 기준 절대 7분'이다(Date.now() - testStartTime 비교).
+  // 앞 STEP이 오래 걸리면 크롤에 실제로 주어지는 시간은 7분보다 짧아진다.
+  const CRAWL_DEADLINE_MS = 7 * 60 * 1000; // 크롤 중단 시점 (테스트 시작 기준 절대값)
   const REPORT_SAFETY_MS  = 8.5 * 60 * 1000; // 이 시점을 넘기면 이후 반복 항목은 스킵 — 최종 리포트 저장 보장
 
   // 전체 test 타임아웃(10분)에 걸리면 report-status.json이 아예 안 써지고 런이 UNKNOWN으로 잡혀
@@ -819,22 +837,104 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
     page.on('request', onRequest);
     page.on('response', onResponse);
 
+    // ── 순수 관측자 (판정에 영향 없음) ───────────────────────────────
+    // 현재 대기(networkidle 8s + 고정 2s)가 API를 자르고 있는지 확인할 근거를 모은다.
+    // apiRecords 는 쿼리를 뗀 URL로 중복 제거하므로 '원시 요청 수'와 직접 비교할 수 없다
+    // → 언어별 원시 건수와 METHOD+정규화 URL 집합을 따로 기록한다.
+    //
+    // 한계(중요): 대기가 끝나면 다음 언어로 넘어가므로 '아직 시작조차 안 한' 지연 API는
+    // 이 계측으로 발견할 수 없다. 이 수치로 '안 잘렸다'를 결론지어선 안 된다.
+    const apiObs = new Map<string, ApiObservation>();
+    const obsOfLang = (lang: string): ApiObservation => {
+      let o = apiObs.get(lang);
+      if (!o) {
+        o = { lang, requests: 0, responses: 0, failed: 0, endpoints: [],
+              firstRequestMs: null, lastRequestMs: null, lastSettledMs: null,
+              inFlightAtWaitEnd: 0, networkIdle: 'not-run',
+              gotoMs: 0, networkIdleWaitMs: 0, settleWaitMs: 0, totalMs: 0, navStartedAt: 0 };
+        apiObs.set(lang, o);
+      }
+      return o;
+    };
+    // 요청 '시작 시점'의 언어를 기억한다 — 다음 언어로 넘어간 뒤 도착한 응답도 원래 언어에 집계.
+    const reqLang = new Map<import('@playwright/test').Request, string>();
+    const endpointSet = new Map<string, Set<string>>();   // lang → 'METHOD 정규화URL'
+    let currentLang = '';
+    let navigationStartedAt = 0;                          // 모든 상대 시각의 기준점
+
+    const isOwnApi = (req: import('@playwright/test').Request) => {
+      const rt = req.resourceType();
+      return (rt === 'xhr' || rt === 'fetch') && isOwnHost(req.url());
+    };
+    // 상대 시각은 반드시 '그 요청이 시작된 언어'의 navigation 기준으로 잰다.
+    // 전역 기준을 쓰면 다음 언어로 넘어간 뒤 도착한 응답의 lastSettledMs 가 새 기준으로 계산돼
+    // 음수에 가깝거나 의미 없는 값이 된다.
+    const relTo = (o: ApiObservation) => (o.navStartedAt ? Date.now() - o.navStartedAt : 0);
+
+    const observeReq = (req: import('@playwright/test').Request) => {
+      if (!currentLang || !isOwnApi(req)) return;
+      reqLang.set(req, currentLang);
+      const o = obsOfLang(currentLang);
+      o.requests++;
+      const t = relTo(o);
+      if (o.firstRequestMs === null) o.firstRequestMs = t;
+      o.lastRequestMs = t;
+      if (!endpointSet.has(currentLang)) endpointSet.set(currentLang, new Set());
+      endpointSet.get(currentLang)!.add(`${req.method()} ${req.url().split('?')[0]}`);
+    };
+    // 같은 Request 로 response 와 requestfailed 가 겹쳐 들어와도 중복 정산되지 않는다 —
+    // Map 에서 지우면서 정산하므로 두 번째 호출은 조용히 무시된다.
+    const settle = (req: import('@playwright/test').Request, kind: 'res' | 'fail') => {
+      const lang = reqLang.get(req);
+      if (lang === undefined) return;
+      reqLang.delete(req);
+      const o = obsOfLang(lang);
+      if (kind === 'res') o.responses++; else o.failed++;
+      o.lastSettledMs = relTo(o);   // 전역이 아니라 '요청이 시작된 언어'의 기준
+    };
+    const observeRes  = (res: import('@playwright/test').Response) => settle(res.request(), 'res');
+    const observeFail = (req: import('@playwright/test').Request) => settle(req, 'fail');
+
+    page.on('request', observeReq);
+    page.on('response', observeRes);
+    page.on('requestfailed', observeFail);
+
     await page.setExtraHTTPHeaders(headers);
 
     for (const lang of languages) {
       if (budgetHit('STEP2·API수집')) { console.log('[SKIP][API수집] 시간 예산 초과 — 이후 언어 건너뜀'); break; }
       await test.step(`[${lang}] 페이지 탐색 → API 수집`, async () => {
         const startPage = `${baseUrl}/${lang}`;
+        currentLang = lang;
+        const o = obsOfLang(lang);
         try {
           // networkidle을 진입 조건으로 걸면 자산 하나가 안 끝날 때 20초를 통째로 날리고
           // 그 언어의 API 수집이 0건이 된다. → 진입은 domcontentloaded로 확정하고,
           // XHR을 긁어모으기 위한 안정화 대기만 별도로 짧게 준다(실패해도 그냥 진행).
+          // (대기 구조·시간은 변경하지 않는다 — 아래 시각 기록은 계측일 뿐이다)
+          const tNav = Date.now();
+          navigationStartedAt = tNav;
+          o.navStartedAt = tNav;
           await page.goto(startPage, { waitUntil: 'domcontentloaded', timeout: 20000 });
+          o.gotoMs = Date.now() - tNav;
           await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-          await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+          const tIdle = Date.now();
+          // 예외를 전부 timeout 으로 뭉치지 않는다 — 타임아웃과 그 밖의 오류를 구분해 기록한다.
+          await page.waitForLoadState('networkidle', { timeout: 8000 })
+            .then(() => { o.networkIdle = 'resolved'; })
+            .catch((e: Error) => { o.networkIdle = /Timeout/i.test(e?.message ?? '') ? 'timeout' : 'error'; });
+          o.networkIdleWaitMs = Date.now() - tIdle;
+          const tSettle = Date.now();
           await page.waitForTimeout(2000);
-          console.log(`[INFO][${lang}] 페이지 탐색 완료, API 수집 중...`);
+          o.settleWaitMs = Date.now() - tSettle;
+          // 대기 종료 '시점'의 미응답 수를 고정한다(이후 늦게 도착하는 응답은 카운터에만 반영).
+          o.inFlightAtWaitEnd = [...reqLang.values()].filter(l => l === lang).length;
+          o.totalMs = Date.now() - tNav;
+          console.log(`[INFO][${lang}] 페이지 탐색 완료, API 수집 중... `
+            + `(goto ${o.gotoMs}ms · idle ${o.networkIdleWaitMs}ms/${o.networkIdle} · 고정 ${o.settleWaitMs}ms `
+            + `· 요청 ${o.requests} 응답 ${o.responses} 실패 ${o.failed} 미응답 ${o.inFlightAtWaitEnd})`);
         } catch {
+          o.totalMs = navigationStartedAt ? Date.now() - navigationStartedAt : 0;
           console.log(`[SKIP][${lang}] 페이지 진입 실패: ${startPage}`);
         }
       });
@@ -843,6 +943,13 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
     // STEP 2 종료 후 리스너 제거 → STEP 3 탐색에 영향 없도록
     page.off('request', onRequest);
     page.off('response', onResponse);
+    // 관측자도 여기서만 뗀다 — 언어별로 붙였다 떼면 늦게 도착한 응답이 유실된다.
+    currentLang = '';
+    page.off('request', observeReq);
+    page.off('response', observeRes);
+    page.off('requestfailed', observeFail);
+    for (const [lang, set] of endpointSet) obsOfLang(lang).endpoints = [...set].sort();
+    apiObservation = [...apiObs.values()];
 
     await test.step(`수집된 API 검증 (총 ${apiRecords.length}건)`, async () => {
       console.log(`[INFO] 총 ${apiRecords.length}개 API 수집 완료`);
@@ -1022,6 +1129,10 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
     // '시간이 없어 점검을 덜 함'이 리포트에서 똑같이 초록불로 보인다.
     if (crawlTruncated) {
       warnCount++;
+      // 크롤 중단도 '점검이 축소된' 것이므로 반드시 미완주로 잡아야 한다.
+      // 예전엔 WARN 기록만 남기고 truncatedSteps 에 넣지 않아, 크롤이 통째로 잘려도
+      // 다른 STEP만 끝나면 coverageComplete=true 로 보고됐다(미탐).
+      truncatedSteps.add('STEP3·크롤');
       const ts = kstNow();
       const symptom = `크롤 시간 예산(${CRAWL_DEADLINE_MS / 60000}분) 초과로 링크 전수조사가 중단됨 — 미점검 링크 있음`;
       console.log(`[WARN][크롤] ${symptom} @ ${ts}`);
@@ -1968,6 +2079,30 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
     failRecords.filter(f => f.severity !== 'WARN' && f.severity !== 'INFO').map(f => f.fingerprint as string),
   )].sort();
 
+  // 관측 전수 집합은 별도 아티팩트로 남긴다 — 커버리지 비교에는 목록 전체가 필요하다.
+  // 경로는 test-results/ 아래(이미 gitignore 대상)라 저장소를 더럽히지 않는다.
+  const API_OBS_PATH = path.join('test-results', 'api-observation.json');
+  // 다이제스트는 두 종류로 나눈다.
+  //   fileDigest      : 파일 전체 무결성 — 아티팩트가 온전한지 확인용
+  //   endpointsDigest : 엔드포인트 집합만 — 런 간 '커버리지가 같은가' 비교용
+  //                     (시각·건수가 달라도 집합이 같으면 같은 값이 나와야 한다)
+  let apiObservationDigest = '';
+  let apiEndpointsDigest = '';
+  try {
+    const payload = JSON.stringify({ runId: RUN_ID, netPolicy: NET_POLICY_ON ? 'on' : 'off', observations: apiObservation }, null, 2);
+    fs.mkdirSync('test-results', { recursive: true });
+    fs.writeFileSync(API_OBS_PATH, payload);
+    apiObservationDigest = crypto.createHash('sha256').update(payload).digest('hex').slice(0, 16);
+    const epCanon = JSON.stringify(
+      [...apiObservation].sort((a, b) => a.lang.localeCompare(b.lang))
+        .map(o => [o.lang, [...o.endpoints].sort()]),
+    );
+    apiEndpointsDigest = crypto.createHash('sha256').update(epCanon).digest('hex').slice(0, 16);
+    await test.info().attach('STEP2 API 관측 (전수)', { path: API_OBS_PATH, contentType: 'application/json' }).catch(() => {});
+  } catch (e) {
+    console.log(`[WARN][관측] ${API_OBS_PATH} 기록 실패: ${(e as Error).message.split('\n')[0]}`);
+  }
+
   fs.writeFileSync('report-status.json', JSON.stringify({
     status, passCount, failCount, warnCount, slowCount, infoCount, serverTimes,
     // 시간 예산으로 일부 STEP을 건너뛰었으면 이 런의 PASS는 '전 항목 정상'을 뜻하지 않는다.
@@ -1978,6 +2113,14 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
     runId: RUN_ID,
     // 변경 전후 요청량 A/B 비교용 계측 — 같은 러너에서 HC_NET_POLICY 를 바꿔 연속 실행해 비교한다.
     netPolicy: NET_POLICY_ON ? 'on' : 'off',
+    // STEP2 대기 계측 — 순수 관측값이며 판정에 쓰지 않는다.
+    // endpoints 전체 목록은 용량이 커질 수 있어 report-status.json 에는 요약만 싣고,
+    // 전수 집합은 별도 파일(api-observation.json)과 해시로 남긴다.
+    apiObservation: apiObservation.map(o => ({
+      ...o, endpoints: undefined, uniqueEndpoints: o.endpoints.length,
+    })),
+    apiObservationDigest,
+    apiEndpointsDigest,
     // 증거 없는 FAIL·WARN 이 0건이어야 한다(INFO 외부 링크는 대상 아님).
     evidenceMissing: failRecords.filter(f => f.severity !== 'INFO' && !f.evidencePath).length,
     // own/third 는 '브라우저가 낸 요청'만 센다(page.request·raw https·TLS 제외).

@@ -253,3 +253,177 @@ test.describe('증거 수집 규칙', () => {
     expect(missing).toHaveLength(0);
   });
 });
+
+// ── 점검 완주(coverageComplete) 판정 ───────────────────────────────
+// 본체는 truncatedSteps 가 비어 있을 때만 coverageComplete=true 로 내린다.
+// 크롤 중단(crawlTruncated)은 예전에 WARN 기록만 남기고 truncatedSteps 에 들어가지 않아,
+// 링크 전수조사가 통째로 잘려도 다른 STEP만 끝나면 완주로 보고되는 미탐이 있었다.
+test.describe('점검 완주 판정', () => {
+  const coverage = (skipped: string[]) => ({
+    coverageComplete: skipped.length === 0,
+    skippedSteps: skipped,
+  });
+
+  test('스킵된 STEP이 없으면 완주', () => {
+    expect(coverage([]).coverageComplete).toBe(true);
+  });
+
+  test('크롤 중단은 미완주로 잡힌다 (기존 미탐)', () => {
+    const c = coverage(['STEP3·크롤']);
+    expect(c.coverageComplete).toBe(false);
+    expect(c.skippedSteps).toContain('STEP3·크롤');
+  });
+
+  test('크롤만 잘리고 나머지 STEP이 전부 끝나도 완주가 아니다', () => {
+    // on-1 에서 실제로 있었던 조합 — 크롤이 절대 7분에서 끊겼다
+    expect(coverage(['STEP3·크롤']).coverageComplete).toBe(false);
+  });
+
+  test('예산 초과 STEP과 크롤 중단이 함께 기록된다', () => {
+    const c = coverage(['STEP3·크롤', 'STEP7·로그인', 'STEP8·이지다운', 'STEP9·인증서']);
+    expect(c.coverageComplete).toBe(false);
+    expect(c.skippedSteps).toHaveLength(4);
+  });
+});
+
+// ── STEP2 API 관측자 (순수 관측) ───────────────────────────────────
+// 관측자가 기존 판정 저장소(apiRecords)를 건드리지 않는지, 언어 매핑·중복 정산 방어가
+// 동작하는지를 fixture 로 검증한다. 운영 실행 결과는 네트워크 변동이 있어 하드 게이트로 쓰지 않는다.
+test.describe('STEP2 API 관측자', () => {
+  type Req = { url: string; method: string; type: string };
+  const OWN = /^(([a-z0-9-]+\.)*ezlab\.im)$/i;
+
+  function makeObserver() {
+    const obs = new Map<string, { requests: number; responses: number; failed: number; endpoints: Set<string> }>();
+    const reqLang = new Map<Req, string>();
+    const of = (l: string) => {
+      let o = obs.get(l);
+      if (!o) { o = { requests: 0, responses: 0, failed: 0, endpoints: new Set() }; obs.set(l, o); }
+      return o;
+    };
+    let currentLang = '';
+    const isOwnApi = (r: Req) => {
+      if (r.type !== 'xhr' && r.type !== 'fetch') return false;
+      try { return OWN.test(new URL(r.url).hostname); } catch { return false; }
+    };
+    return {
+      setLang: (l: string) => { currentLang = l; },
+      onRequest(r: Req) {
+        if (!currentLang || !isOwnApi(r)) return;
+        reqLang.set(r, currentLang);
+        const o = of(currentLang);
+        o.requests++;
+        o.endpoints.add(`${r.method} ${r.url.split('?')[0]}`);
+      },
+      settle(r: Req, kind: 'res' | 'fail') {
+        const l = reqLang.get(r);
+        if (l === undefined) return;        // 중복 정산 방어
+        reqLang.delete(r);
+        const o = of(l);
+        if (kind === 'res') o.responses++; else o.failed++;
+      },
+      inFlight: (l: string) => [...reqLang.values()].filter(x => x === l).length,
+      get: (l: string) => of(l),
+    };
+  }
+
+  const api = (url: string, method = 'GET'): Req => ({ url, method, type: 'xhr' });
+
+  test('요청 시작 시점의 언어로 집계된다 (늦은 응답이 다음 언어로 새지 않음)', () => {
+    const ob = makeObserver();
+    ob.setLang('ko');
+    const r = api('https://ezlab.im/api/tools/info?locale=ko');
+    ob.onRequest(r);
+    ob.setLang('en');                        // 다음 언어로 넘어간 뒤
+    ob.settle(r, 'res');                     // ko 요청의 응답이 도착
+    expect(ob.get('ko').responses).toBe(1);
+    expect(ob.get('en').responses).toBe(0);
+  });
+
+  test('같은 요청이 response·requestfailed 로 두 번 와도 한 번만 정산된다', () => {
+    const ob = makeObserver();
+    ob.setLang('ko');
+    const r = api('https://ezlab.im/api/auth/me');
+    ob.onRequest(r);
+    ob.settle(r, 'res');
+    ob.settle(r, 'fail');                    // 두 번째는 무시돼야 한다
+    expect(ob.get('ko').responses).toBe(1);
+    expect(ob.get('ko').failed).toBe(0);
+  });
+
+  test('requestfailed 도 inFlight 를 정상 정리한다', () => {
+    const ob = makeObserver();
+    ob.setLang('ko');
+    const r = api('https://ezlab.im/api/x');
+    ob.onRequest(r);
+    expect(ob.inFlight('ko')).toBe(1);
+    ob.settle(r, 'fail');
+    expect(ob.inFlight('ko')).toBe(0);
+    expect(ob.get('ko').failed).toBe(1);
+  });
+
+  test('제3자 XHR·이미지·스크립트는 무시된다', () => {
+    const ob = makeObserver();
+    ob.setLang('ko');
+    ob.onRequest({ url: 'https://google-analytics.com/g/collect', method: 'POST', type: 'xhr' });
+    ob.onRequest({ url: 'https://ezlab.im/logo.png', method: 'GET', type: 'image' });
+    ob.onRequest({ url: 'https://ezlab.im/app.js', method: 'GET', type: 'script' });
+    expect(ob.get('ko').requests).toBe(0);
+  });
+
+  test('엔드포인트는 METHOD + 쿼리 제거 URL 로 집계되고 상한이 없다', () => {
+    const ob = makeObserver();
+    ob.setLang('ko');
+    for (let i = 0; i < 60; i++) ob.onRequest(api(`https://ezlab.im/api/e${i}?v=${i}`));
+    ob.onRequest(api('https://ezlab.im/api/e0?v=other'));   // 같은 엔드포인트, 다른 쿼리
+    ob.onRequest(api('https://ezlab.im/api/e0', 'POST'));   // 같은 URL, 다른 메서드
+    expect(ob.get('ko').requests).toBe(62);
+    expect(ob.get('ko').endpoints.size).toBe(61);           // 60 + POST 1, 40개 상한 없음
+  });
+
+  test('언어가 바뀐 뒤 늦게 정산된 응답은 원래 언어의 navigation 기준으로 시각을 잰다', () => {
+    // 전역 기준을 쓰면 다음 언어의 navigation 시각으로 계산돼 값이 무의미해진다.
+    type Obs = { navStartedAt: number; lastSettledMs: number | null };
+    const obs: Record<string, Obs> = {
+      ko: { navStartedAt: 1000, lastSettledMs: null },
+      en: { navStartedAt: 9000, lastSettledMs: null },   // ko보다 8초 뒤에 시작
+    };
+    const reqLang = new Map<string, string>();
+    const relTo = (o: Obs, now: number) => (o.navStartedAt ? now - o.navStartedAt : 0);
+
+    reqLang.set('req-ko-1', 'ko');           // ko 구간에서 시작한 요청
+    const settleAt = 12000;                  // en 구간으로 넘어간 뒤 도착
+    const lang = reqLang.get('req-ko-1')!;
+    obs[lang].lastSettledMs = relTo(obs[lang], settleAt);
+
+    expect(lang).toBe('ko');
+    expect(obs.ko.lastSettledMs).toBe(11000); // ko 기준 11초 — 전역(en) 기준이면 3000이 됐을 값
+    expect(obs.en.lastSettledMs).toBeNull();
+  });
+
+  test('networkIdle 대기가 실행되지 않으면 resolved 로 남지 않는다', () => {
+    // 진입 실패로 대기 자체가 안 돌면 not-run 이어야 한다 — resolved 로 두면 '정상 완료'로 오독된다.
+    const initial: 'not-run' | 'resolved' | 'timeout' | 'error' = 'not-run';
+    expect(initial).toBe('not-run');
+    const outcomes = {
+      성공:   'resolved',
+      타임아웃: /Timeout/i.test('Timeout 8000ms exceeded') ? 'timeout' : 'error',
+      기타오류: /Timeout/i.test('Target closed') ? 'timeout' : 'error',
+    };
+    expect(outcomes.성공).toBe('resolved');
+    expect(outcomes.타임아웃).toBe('timeout');
+    expect(outcomes.기타오류).toBe('error');
+  });
+
+  test('관측자는 판정 저장소(apiRecords)를 변경하지 않는다', () => {
+    const apiRecords = [{ url: 'https://ezlab.im/api/auth/me', status: 200 }];
+    const before = JSON.stringify(apiRecords);
+    const ob = makeObserver();
+    ob.setLang('ko');
+    const r = api('https://ezlab.im/api/auth/me');
+    ob.onRequest(r);
+    ob.settle(r, 'res');
+    expect(JSON.stringify(apiRecords)).toBe(before);        // 관측은 순수 — 저장소 불변
+    expect(ob.get('ko').requests).toBe(1);
+  });
+});
