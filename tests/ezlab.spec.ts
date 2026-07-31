@@ -173,6 +173,26 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   const checkedImageUrls = new Set<string>();
 
   // ── 서비스 도구 페이지 (STEP 3 크롤링에서 자동 수집) ────────────
+  // ── 제품 배포 플랫폼 정책 ────────────────────────────────────────
+  // 웹 헬스체크는 데스크톱 설치 파일과 다운로드 버튼을 검증한다. 모바일 전용 제품에는
+  // 애초에 해당 검사가 성립하지 않으므로 '실패'가 아니라 '검사 대상 아님'이다.
+  // HTTP 403 이나 .exe 확장자 같은 '증상'으로 일괄 무시하면 진짜 장애까지 가려지므로,
+  // 반드시 제품 단위 정책으로만 분기한다. 여기 없는 제품은 전부 데스크톱으로 본다.
+  const MOBILE_ONLY_PRODUCTS: { pattern: RegExp; product: string; reason: string }[] = [
+    {
+      pattern: /\/tool\/ezdown(\/|$)/i,
+      product: '이지다운',
+      reason: '모바일 전용 앱(Google Play 배포) — 데스크톱 설치 파일·다운로드 버튼 검증 대상 아님',
+    },
+  ];
+  const mobileOnly = (url: string) => MOBILE_ONLY_PRODUCTS.find(p => p.pattern.test(url));
+  // 정책으로 건너뛴 항목 — PASS 로 올리지 않고 별도로 남긴다(스코어·판정에 영향 없음).
+  const policySkips: { step: string; product: string; url: string; reason: string }[] = [];
+  const recordPolicySkip = (step: string, product: string, url: string, reason: string) => {
+    policySkips.push({ step, product, url, reason });
+    console.log(`[SKIP][${step}][${product}] ${reason} — ${url}`);
+  };
+
   const discoveredToolUrls = new Set<string>();
   // STEP5(메인 페이지 방문)에서 수집한 도구 URL — STEP4가 크롤에 의존하지 않게 하는 근거.
   // 크롤이 나중에 추가로 발견하면 그건 STEP5가 놓친 것이므로 커버리지 누락으로 기록한다.
@@ -1631,6 +1651,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   // 파일을 실제로 내려받지 않기 위해 HEAD → (막히면) 스트리밍 Range 순으로 확인한다.
   // ══════════════════════════════════════════════════════════════════
   stepMark('STEP 4-1');
+
   await test.step('STEP 4-1 · 설치 파일 URL 검증', async () => {
     const fileUrls = new Set<string>();
     for (const lang of languages) {
@@ -1665,6 +1686,14 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
       return;
     }
 
+    // 모바일 전용 제품은 데스크톱 설치 파일 검증 대상이 아니다 — 검사 전에 걸러 SKIP 으로 남긴다.
+    for (const fileUrl of [...fileUrls]) {
+      const m = mobileOnly(fileUrl);
+      if (m) {
+        fileUrls.delete(fileUrl);
+        recordPolicySkip('STEP4-1·파일URL', m.product, fileUrl, m.reason);
+      }
+    }
     console.log(`[INFO][파일] 설치 파일 ${fileUrls.size}건 수집 — HEAD/Range로 존재 확인`);
     for (const fileUrl of fileUrls) {
       if (budgetHit('STEP4-1·파일검증')) { console.log('[SKIP][파일] 시간 예산 초과 — 이후 파일 건너뜀'); break; }
@@ -1705,6 +1734,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
         console.log(`[PASS][파일] ${status} ${name}${note ? ` (${note})` : ''}`);
       } else {
         // 설치 파일을 못 받는 것은 다운로드 기능 자체가 죽은 것 — WARN이 아니라 FAIL.
+        // (모바일 전용 제품은 위에서 이미 제외됐다)
         failCount++;
         const ts = kstNow();
         const symptom = status === 0
@@ -1756,8 +1786,11 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
             intermittentRecoveries.push({ step: 'STEP4·다운로드', type: '다운로드', lang: tlang, url: target.url, status, responseTime, symptom: `간헐 실패 후 회복 (${nav.attempts}회 시도)${detail}`, timestamp: ts, severity: 'WARN' });
           }
 
+          // 모바일 전용 제품은 다운로드 버튼 검사 대상이 아니다.
+          // 페이지 생존(status) 검사는 그대로 두고, 버튼 검사만 건너뛴다.
+          const mobilePolicy = mobileOnly(target.url);
           let hasDownloadLink = false;
-          if (status === 200) {
+          if (status === 200 && !mobilePolicy) {
             const dlLinks = await page.locator('a[href*=".exe"], a[href*=".apk"], a[href*=".zip"], a[href*="download"]').all();
             // 다운로드 CTA가 언어별로 <button>/<a>가 아니라 btn-class <div> 등으로 렌더되는 경우가 있어
             // (ko는 <button>, en/jp/tw는 다른 요소) 요소 종류를 넓히고 텍스트를 정규식으로 매칭 — 오탐 방지.
@@ -1776,6 +1809,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
             console.log(`[FAIL][다운로드][${target.name}] ${status} (${responseTime}ms, ${nav.attempts}회 시도) ${target.url} @ ${ts}`);
             await recordIssue({ step: 'STEP4·다운로드', type: '다운로드', lang: tlang, url: target.url, status, responseTime, symptom, timestamp: ts }, { visual: true, label: `실패_다운로드_${target.name}_${tlang}` });
             expect.soft(status, `[다운로드][${target.name}] 페이지 응답 실패(${nav.attempts}회 재시도) → ${target.url}`).toBe(200);
+          } else if (mobilePolicy) {
+            // PASS 로 올리지 않는다 — 검사한 적이 없으므로 SKIP 으로만 남긴다.
+            recordPolicySkip('STEP4·다운로드', mobilePolicy.product, target.url, mobilePolicy.reason);
           } else if (!hasDownloadLink) {
             warnCount++;
             const ts = kstNow();
@@ -2240,6 +2276,8 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
     stepTimings,
     crawlStats,
     step4Stats,
+    // 제품 플랫폼 정책으로 건너뛴 검사 — PASS 가 아니라 '검사 대상 아님'이다.
+    policySkips,
     // 증거 없는 FAIL·WARN 이 0건이어야 한다(INFO 외부 링크는 대상 아님).
     evidenceMissing: failRecords.filter(f => f.severity !== 'INFO' && !f.evidencePath).length,
     // own/third 는 '브라우저가 낸 요청'만 센다(page.request·raw https·TLS 제외).
@@ -2256,6 +2294,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   console.log(`  도구 페이지: 메인 수집 ${step4Stats.discoveredFromMain} · 검증 ${step4Stats.verified}`
     + ` · 미검증 ${step4Stats.skipped} · 크롤 추가발견 ${step4Stats.discoveredFromCrawl}`
     + ` · 언어 ${step4Stats.languagesFound.join(',') || '-'}${step4Stats.languagesMissing.length ? ` (누락 ${step4Stats.languagesMissing.join(',')})` : ''}`);
+  if (policySkips.length) {
+    console.log(`  정책 제외: ${policySkips.length}건 — ${[...new Set(policySkips.map(p => `${p.product}(${p.step})`))].join(', ')}`);
+  }
   console.log(`  크롤: 완료 페이지 ${crawlStats.pagesCompleted} · 링크 검증 ${crawlStats.linksChecked} · 중단 ${crawlStats.truncated}`);
   {
     const need = failRecords.filter(f => f.severity !== 'INFO');

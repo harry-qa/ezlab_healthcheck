@@ -464,3 +464,57 @@ test.describe('STEP2 API 관측자', () => {
     expect(ob.get('ko').requests).toBe(1);
   });
 });
+
+// ── 제품 배포 플랫폼 정책 ──────────────────────────────────────────
+// 모바일 전용 제품은 데스크톱 설치 파일·다운로드 버튼 검증 대상이 아니다.
+// '실패'가 아니라 '검사 대상 아님'이므로 PASS 로 올리지 않고 SKIP 으로만 남긴다.
+// HTTP 403 이나 .exe 확장자 같은 증상으로 일괄 무시하면 진짜 장애까지 가려지므로
+// 반드시 제품 단위 정책으로만 분기한다.
+test.describe('제품 배포 플랫폼 정책', () => {
+  const MOBILE_ONLY = [
+    { pattern: /\/tool\/ezdown(\/|$)/i, product: '이지다운',
+      reason: '모바일 전용 앱(Google Play 배포) — 데스크톱 설치 파일·다운로드 버튼 검증 대상 아님' },
+  ];
+  const mobileOnly = (url: string) => MOBILE_ONLY.find(p => p.pattern.test(url));
+
+  /** 설치 파일 검증 결과 등급 (STEP4-1) */
+  const gradeInstaller = (url: string, status: number): 'PASS' | 'FAIL' | 'SKIP' => {
+    if (mobileOnly(url)) return 'SKIP';               // 검사 자체를 하지 않는다
+    return (status === 200 || status === 206) ? 'PASS' : 'FAIL';
+  };
+  /** 다운로드 버튼 검사 결과 등급 (STEP4) */
+  const gradeButton = (url: string, pageStatus: number, hasButton: boolean): 'PASS' | 'WARN' | 'FAIL' | 'SKIP' => {
+    if (pageStatus !== 200) return 'FAIL';            // 페이지 생존 검사는 정책과 무관하게 유지
+    if (mobileOnly(url)) return 'SKIP';
+    return hasButton ? 'PASS' : 'WARN';
+  };
+
+  const C = 'https://cdn.ezlab.im/tool';
+  const P = 'https://ezlab.im/ko/tool';
+
+  test('이지다운의 .exe 403 → FAIL 아님, 정책 SKIP', () => {
+    expect(gradeInstaller(`${C}/ezdown/ezDown_Setup_home.exe`, 403)).toBe('SKIP');
+    expect(gradeInstaller(`${C}/ezdown/ezDown_Setup_home.exe`, 403)).not.toBe('FAIL');
+  });
+
+  test('이지다운 다운로드 버튼 없음 → WARN 아님, 정책 SKIP', () => {
+    expect(gradeButton(`${P}/ezdown`, 200, false)).toBe('SKIP');
+    expect(gradeButton(`${P}/ezdown`, 200, false)).not.toBe('WARN');
+  });
+
+  test('다른 데스크톱 제품의 .exe 403 → 기존대로 FAIL', () => {
+    expect(gradeInstaller(`${C}/ezcapture/ezCapture_Setup_home.exe`, 403)).toBe('FAIL');
+    expect(gradeInstaller(`${C}/ezzip/ezZip_Setup_home.exe`, 403)).toBe('FAIL');
+    expect(gradeButton(`${P}/ezcapture`, 200, false)).toBe('WARN');
+  });
+
+  test('정책은 제품 경로로만 판별 — 확장자·상태코드로 일괄 무시하지 않는다', () => {
+    // 다른 제품 경로에 이지다운 파일명이 있어도 FAIL
+    expect(gradeInstaller(`${C}/ezcapture/ezDown_Setup_home.exe`, 403)).toBe('FAIL');
+  });
+
+  test('이지다운도 페이지 생존 검사는 유지된다', () => {
+    expect(gradeButton(`${P}/ezdown`, 500, false)).toBe('FAIL');
+    expect(gradeButton(`${P}/ezdown`, 0, false)).toBe('FAIL');
+  });
+});
