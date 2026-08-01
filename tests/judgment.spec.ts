@@ -518,3 +518,354 @@ test.describe('제품 배포 플랫폼 정책', () => {
     expect(gradeButton(`${P}/ezdown`, 0, false)).toBe('FAIL');
   });
 });
+
+// ── 실패 경로 재시도 정책 ──────────────────────────────────────────
+// 본체 shouldRetryStatus / retryDelayMs / retryBudgetOk 와 동일하게 유지할 것.
+// 규칙: 성공·4xx는 즉시 확정, 5xx·응답없음(0)만 점진 백오프(2s→4s)로 재시도.
+// 예외(지연 404): 자사 호스트 + 멱등 GET + 응답 8초 이상(오리진 간헐 시그니처)일 때만 재시도.
+const OWN_RETRY_RE = /^(([a-z0-9-]+\.)*ezlab\.im|([a-z0-9-]+\.)*ezdown\.kr)$/i;
+const isOwnHostR = (u: string) => { try { return OWN_RETRY_RE.test(new URL(u).hostname); } catch { return false; } };
+const VERY_SLOW_MS = 8000;
+const RETRY_BACKOFF_MS = [2000, 4000];
+const retryDelayMs = (attempt: number) =>
+  RETRY_BACKOFF_MS[Math.min(attempt - 1, RETRY_BACKOFF_MS.length - 1)];
+const shouldRetryStatus = (
+  status: number,
+  opts: { url: string; method?: string; responseTimeMs?: number },
+): boolean => {
+  if (status === 0 || status >= 500) return true;
+  return status === 404
+    && (opts.method ?? 'GET').toUpperCase() === 'GET'
+    && isOwnHostR(opts.url)
+    && (opts.responseTimeMs ?? 0) >= VERY_SLOW_MS;
+};
+
+// 예산 게이트 — 본체는 Date.now() - testStartTime 을 쓰지만 규칙 검증엔 경과 시간을 인자로 받는다.
+// 기준은 전체 타임아웃(600s)이 아니라 안전 예산(REPORT_SAFETY_MS, 510s)이다. 재시도가 510s를
+// 넘겨 이어지면 이후 검사가 예산 가드에 걸려 스킵되고 coverageComplete=false 가 되기 때문이다.
+// 510~600s 구간은 증거 생성·리포트 저장 여유로 남긴다.
+const TEST_TIMEOUT_MS = 600000;
+const REPORT_SAFETY_MS = 8.5 * 60 * 1000; // 510s
+const retryBudgetOk = (elapsedMs: number, backoffMs: number, requestTimeoutMs: number) =>
+  elapsedMs + backoffMs + requestTimeoutMs <= REPORT_SAFETY_MS;
+
+test.describe('재시도 조건 판정', () => {
+  const cases: [number, { url: string; method?: string; responseTimeMs?: number }, boolean, string][] = [
+    [500, { url: `${B}/ko` },                                     true,  '서버 오류'],
+    [502, { url: `${B}/api/x` },                                  true,  '게이트웨이 오류'],
+    [504, { url: `${B}/_next/image?url=x` },                      true,  '이미지 프록시 타임아웃'],
+    [0,   { url: `${B}/ko` },                                     true,  '응답 없음(타임아웃·접속 불가)'],
+    [404, { url: `${B}/ko/none`, responseTimeMs: 300 },           false, '빠른 404 — 즉시 기존 판정'],
+    [403, { url: `${B}/ko/tool/x` },                              false, '4xx 즉시 확정'],
+    [400, { url: `${B}/api/x` },                                  false, '4xx 즉시 확정'],
+    [429, { url: `${B}/ko` },                                     false, '레이트리밋 — 재시도가 오히려 해로움'],
+    [200, { url: `${B}/ko` },                                     false, '정상'],
+    [304, { url: `${B}/ko` },                                     false, '재검증 정상'],
+    // 지연 404 예외 — 오리진 간헐 시그니처(자사·GET·8s 이상)에만 한정
+    [404, { url: `${B}/ko/tool/ezcapture`, responseTimeMs: 9500 }, true,  '지연 404(자사·GET·8s 이상) — 간헐 시그니처'],
+    [404, { url: `${B}/ko/tool/ezcapture`, responseTimeMs: 8000 }, true,  '지연 404 경계값(8s)도 재시도'],
+    [404, { url: 'https://abr.ge/page', responseTimeMs: 9500 },    false, '외부 도메인 지연 404는 일반화하지 않음'],
+    [404, { url: `${B}/api/x`, method: 'POST', responseTimeMs: 9500 }, false, '비GET 지연 404는 재시도 금지(부작용 방지)'],
+  ];
+  for (const [status, opts, expected, desc] of cases) {
+    test(`${status} ${opts.method ?? 'GET'} ${opts.responseTimeMs ?? '-'}ms → ${expected ? '재시도' : '즉시 확정'} (${desc})`, () => {
+      expect(shouldRetryStatus(status, opts)).toBe(expected);
+    });
+  }
+
+  test('백오프는 점진(2s → 4s)이고 이후 시도는 4s로 고정', () => {
+    expect(retryDelayMs(1)).toBe(2000);
+    expect(retryDelayMs(2)).toBe(4000);
+    expect(retryDelayMs(3)).toBe(4000);
+  });
+});
+
+test.describe('재시도 예산 게이트', () => {
+  test('여유가 충분하면 재시도 허용', () => {
+    expect(retryBudgetOk(60_000, 2000, 12_000)).toBe(true);
+  });
+  test('경과 500초 — 재시도를 생략하고 최초 실패로 확정한다', () => {
+    expect(retryBudgetOk(500_000, 2000, 12_000)).toBe(false);
+  });
+  test('경계값: 510s − 백오프 − timeout 까지가 허용 한계', () => {
+    // 510 − 2 − 15 = 493s 경과까지는 허용, 그 뒤는 차단
+    expect(retryBudgetOk(493_000, 2000, 15_000)).toBe(true);
+    expect(retryBudgetOk(493_001, 2000, 15_000)).toBe(false);
+  });
+  test('안전 예산(510초)을 넘겨 이어지는 재시도는 허용되지 않는다', () => {
+    // 이 게이트가 보장하는 것은 '재시도 경로'뿐이다 — 최초 요청·locator·증거 생성 등 다른 await는
+    // 통제하지 못하므로 런 전체가 600초 안에 끝난다거나 리포트가 저장된다는 보장은 아니다.
+    const worstEnd = (elapsed: number, backoff: number, timeout: number) => elapsed + backoff + timeout;
+    for (const [elapsed, backoff, timeout] of [[493_000, 2000, 15_000], [400_000, 4000, 20_000], [0, 2000, 12_000]] as const) {
+      if (retryBudgetOk(elapsed, backoff, timeout)) {
+        expect(worstEnd(elapsed, backoff, timeout)).toBeLessThanOrEqual(REPORT_SAFETY_MS);
+      }
+    }
+    // 510~600초 구간은 재시도가 아니라 증거·리포트 저장 여유로 남긴다.
+    expect(retryBudgetOk(520_000, 2000, 12_000)).toBe(false);
+    expect(REPORT_SAFETY_MS).toBeLessThan(TEST_TIMEOUT_MS);
+  });
+  test('예산 부족 시 기록: retrySkipped=budget + 최초 실패 상태 유지', () => {
+    // 본체 헬퍼(gotoWithRetry 등)의 규칙을 시뮬레이션: 게이트에 걸리면 재시도 없이
+    // 마지막 관측 실패로 확정하고 retrySkipped 를 남긴다.
+    const simulate = (firstStatus: number, elapsedMs: number) => {
+      let retrySkipped: 'budget' | undefined;
+      let attempts = 1;
+      if (shouldRetryStatus(firstStatus, { url: `${B}/ko` })) {
+        if (!retryBudgetOk(elapsedMs, retryDelayMs(1), 12_000)) retrySkipped = 'budget';
+        else attempts = 2;
+      }
+      return { status: firstStatus, attempts, retrySkipped };
+    };
+    const r = simulate(503, 500_000);
+    expect(r.retrySkipped).toBe('budget');
+    expect(r.attempts).toBe(1);       // 재시도 없이
+    expect(r.status).toBe(503);       // 최초 실패로 확정
+    const ok = simulate(503, 60_000);
+    expect(ok.retrySkipped).toBeUndefined();
+    expect(ok.attempts).toBe(2);
+  });
+});
+
+// ── 이미지 재시도 판정 (STEP5/6/8 능동 검증과 동일 규칙) ────────────
+// 1차 결과가 5xx·응답없음(0)일 때만 1회 재시도하고, 4xx·Content-Type 오류는 즉시 확정한다.
+test.describe('이미지 재시도 판정', () => {
+  type Probe = { status: number; contentType: string; contentRange: string; bodyLen: number };
+  const judge = (p: Probe) => judgeImage(p.status, p.contentType, p.contentRange, p.bodyLen);
+  /** verifyImage 규칙 시뮬레이션 — first 실패가 재시도 대상이면 second 로 최종 판정 */
+  function judgeWithRetry(first: Probe, second: Probe | null, budgetOk = true) {
+    const r1 = judge(first);
+    if (r1.ok) return { ok: true, attempts: 1, recovered: false, retrySkipped: undefined as 'budget' | undefined };
+    if (!shouldRetryStatus(first.status, { url: `${B}/_next/image?url=/img.png` })) {
+      return { ok: false, attempts: 1, recovered: false, retrySkipped: undefined };
+    }
+    if (!budgetOk) return { ok: false, attempts: 1, recovered: false, retrySkipped: 'budget' as const };
+    const r2 = judge(second!);
+    return { ok: r2.ok, attempts: 2, recovered: r2.ok, retrySkipped: undefined };
+  }
+  const png = (status = 200): Probe => ({ status, contentType: 'image/png', contentRange: '', bodyLen: 1024 });
+  const fail = (status: number): Probe => ({ status, contentType: 'text/html', contentRange: '', bodyLen: 100 });
+
+  test('504 → 200 회복: 2회 시도 후 정상, 회복은 INFO 기록 대상', () => {
+    const r = judgeWithRetry(fail(504), png());
+    expect(r).toEqual({ ok: true, attempts: 2, recovered: true, retrySkipped: undefined });
+  });
+  test('504 → 504 최종 실패: 기존 WARN 유지', () => {
+    const r = judgeWithRetry(fail(504), fail(504));
+    expect(r.ok).toBe(false);
+    expect(r.attempts).toBe(2);
+    expect(r.recovered).toBe(false);
+  });
+  test('응답 없음(0) → 200 회복', () => {
+    expect(judgeWithRetry({ status: 0, contentType: '', contentRange: '', bodyLen: 0 }, png()).recovered).toBe(true);
+  });
+  test('403 즉시 확정: 재시도 없이 1회 시도 (OG 이미지 403 시나리오)', () => {
+    const r = judgeWithRetry(fail(403), null);
+    expect(r).toEqual({ ok: false, attempts: 1, recovered: false, retrySkipped: undefined });
+  });
+  test('200 + text/html(Content-Type 오류)은 재시도하지 않고 즉시 확정', () => {
+    const r = judgeWithRetry({ status: 200, contentType: 'text/html', contentRange: '', bodyLen: 500 }, null);
+    expect(r.attempts).toBe(1);
+    expect(r.ok).toBe(false);
+  });
+  test('재시도 도중 예산 부족: 1회 시도 + retrySkipped=budget + 최초 실패 확정', () => {
+    const r = judgeWithRetry(fail(504), null, false);
+    expect(r).toEqual({ ok: false, attempts: 1, recovered: false, retrySkipped: 'budget' });
+  });
+});
+
+// ── 간헐 회복 등급·종합 판정 ───────────────────────────────────────
+// 개별 회복은 INFO(스코어 미반영), 서로 다른 '정규화 지문'이 임계치(2종) 이상일 때만 종합 WARN.
+test.describe('간헐 회복 종합 판정', () => {
+  const INTERMITTENT_WARN_THRESHOLD = 2;
+  type Recovery = { url: string; severity: 'INFO' };
+  const fp = (url: string) => { const u = new URL(url); return `${u.hostname}${u.pathname}|OTHER`; };
+  const judgeIntermittent = (recoveries: Recovery[]) => {
+    const fingerprints = new Set(recoveries.map(r => fp(r.url)));
+    return { escalateWarn: fingerprints.size >= INTERMITTENT_WARN_THRESHOLD, fingerprints: fingerprints.size };
+  };
+
+  test('개별 회복 기록의 등급은 INFO', () => {
+    const rec: Recovery = { url: `${B}/ko/login`, severity: 'INFO' };
+    expect(rec.severity).toBe('INFO');
+  });
+  test('같은 지문 회복 4건(4개 언어) → 종합 WARN 없음 (흔들린 경로는 하나)', () => {
+    const r = judgeIntermittent([
+      { url: `${B}/ko/tool/ezcapture?a=1`, severity: 'INFO' },
+      { url: `${B}/ko/tool/ezcapture?a=2`, severity: 'INFO' },
+      { url: `${B}/ko/tool/ezcapture`, severity: 'INFO' },
+      { url: `${B}/ko/tool/ezcapture?b=3`, severity: 'INFO' },
+    ]);
+    expect(r.fingerprints).toBe(1);
+    expect(r.escalateWarn).toBe(false);
+  });
+  test('서로 다른 지문 2종 회복 → 종합 WARN 승격', () => {
+    const r = judgeIntermittent([
+      { url: `${B}/ko/tool/ezcapture`, severity: 'INFO' },
+      { url: `${B}/ko/login`, severity: 'INFO' },
+    ]);
+    expect(r.escalateWarn).toBe(true);
+  });
+  test('회복 1건 → 런 상태 미반영', () => {
+    expect(judgeIntermittent([{ url: `${B}/ko/login`, severity: 'INFO' }]).escalateWarn).toBe(false);
+  });
+  test('회복 0건 → 판정 없음', () => {
+    expect(judgeIntermittent([]).escalateWarn).toBe(false);
+  });
+});
+
+// ── 인증서 재시도 판정 ─────────────────────────────────────────────
+// 순수 연결 타임아웃만 1회 재시도. 만료·호스트 불일치·검증 실패는 재시도로 달라지지 않는
+// 확정 상태라 즉시 판정한다 — 본체 isConnTimeout 과 동일하게 유지할 것.
+test.describe('인증서 재시도 판정', () => {
+  const isConnTimeout = (m: string) => /^timeout$|ETIMEDOUT/i.test(m);
+  const cases: [string, boolean, string][] = [
+    ['timeout',                                        true,  '자체 타임아웃 마커 (checkCertExpiry)'],
+    ['connect ETIMEDOUT 1.2.3.4:443',                  true,  'OS 레벨 연결 타임아웃'],
+    ['certificate has expired',                        false, '만료 — 재시도 금지 (진짜 신호를 늦추면 안 됨)'],
+    ["Hostname/IP does not match certificate's altnames", false, '호스트 불일치 — 재시도 금지'],
+    ['unable to verify the first certificate',         false, '체인 검증 실패 — 재시도 금지'],
+    ['인증서 정보 없음',                                false, '인증서 조회 실패 — 재시도 금지'],
+    ['connect ECONNREFUSED 1.2.3.4:443',               false, '연결 거부는 타임아웃이 아님'],
+  ];
+  for (const [msg, expected, desc] of cases) {
+    test(`"${msg}" → ${expected ? '1회 재시도' : '즉시 판정'} (${desc})`, () => {
+      expect(isConnTimeout(msg)).toBe(expected);
+    });
+  }
+});
+
+// ── 설치 파일 Range 프로브 재시도 ──────────────────────────────────
+// Range 요청에 한해 5xx·응답없음(0)만 재시도, 4xx는 즉시 확정 (본체 STEP4-1과 동일).
+test.describe('설치 파일 Range 재시도 조건', () => {
+  const probeRetryable = (status: number) => status === 0 || status >= 500;
+  test('프로브 504·응답없음 → 재시도', () => {
+    expect(probeRetryable(504)).toBe(true);
+    expect(probeRetryable(0)).toBe(true);
+  });
+  test('프로브 403·404 → 즉시 확정', () => {
+    expect(probeRetryable(403)).toBe(false);
+    expect(probeRetryable(404)).toBe(false);
+  });
+});
+
+// ── 크롤 네비 재시도 ───────────────────────────────────────────────
+// 네비 실패는 2초 후 1회만 재시도. 회복 → INFO(커버리지 완주 유지), 재실패 → 기존 WARN + 미완주.
+test.describe('크롤 네비 재시도', () => {
+  /** crawlPage 네비 규칙 시뮬레이션 — attempts 는 goto 시도 결과(true=성공) 배열 */
+  function simulateNav(outcomes: boolean[], budgetOk = true) {
+    const incomplete: string[] = [];
+    let recovered = false;
+    let retrySkipped: 'budget' | undefined;
+    let ok = outcomes[0];
+    if (!ok) {
+      if (!budgetOk) retrySkipped = 'budget';
+      else { ok = outcomes[1] ?? false; recovered = ok; }
+    }
+    if (!ok) incomplete.push('페이지렌더실패');
+    return { ok, recovered, retrySkipped, incomplete, warn: !ok, infoRecovery: recovered };
+  }
+
+  test('실패 → 재시도 성공: INFO 회복, WARN·미완주 기록 없음', () => {
+    const r = simulateNav([false, true]);
+    expect(r.warn).toBe(false);
+    expect(r.infoRecovery).toBe(true);
+    expect(r.incomplete).toHaveLength(0);
+  });
+  test('실패 → 재시도도 실패: 기존 WARN + 미완주(coverageComplete=false) 유지', () => {
+    const r = simulateNav([false, false]);
+    expect(r.warn).toBe(true);
+    expect(r.incomplete).toContain('페이지렌더실패');
+  });
+  test('예산 부족: 재시도 생략 + retrySkipped=budget + 기존 WARN', () => {
+    const r = simulateNav([false, true], false);
+    expect(r.warn).toBe(true);              // 회복 기회 없이 최초 실패로 확정
+    expect(r.retrySkipped).toBe('budget');
+  });
+  test('첫 시도 성공: 재시도 없음', () => {
+    const r = simulateNav([true]);
+    expect(r.warn).toBe(false);
+    expect(r.recovered).toBe(false);
+  });
+});
+
+// ── STEP1 워밍업 제외·본측정 재시도 ────────────────────────────────
+// 워밍업 실패는 판정에서 제외하고 본측정 3회로만 판단한다. 본측정 샘플은 5xx·응답없음일 때만
+// 1회 재측정하고(4xx 즉시 확정), 하나라도 살아있지 않으면 그 실패 상태를 대표값으로 채택한다.
+test.describe('STEP1 서버 생존 판정', () => {
+  const alive = (s: number) => s >= 200 && s < 400;
+  /** 샘플: first 관측, retry 는 재측정 결과(재시도 대상일 때만 사용) */
+  function judgeStep1(warmupFailed: boolean, samples: { first: number; retry?: number }[], budgetOk = true) {
+    const statuses: number[] = [];
+    let recovered = false;
+    let retrySkipped: 'budget' | undefined;
+    let measured = 0;   // 실제로 수행한 본측정 횟수 (조기 종료 확인용)
+    for (const s of samples) {
+      measured++;
+      let st = s.first;
+      if (!alive(st) && shouldRetryStatus(st, { url: `${B}/ko` })) {
+        if (!budgetOk) retrySkipped = 'budget';
+        else {
+          st = s.retry ?? 0;
+          if (alive(st)) recovered = true;
+        }
+      }
+      statuses.push(st);
+      // 확정 실패면 남은 샘플은 결과를 바꾸지 못하므로 즉시 종료한다(전면 장애 시 예산 소진 방지).
+      if (!alive(st)) break;
+    }
+    const badStatus = statuses.find(s => !alive(s));
+    // warmupFailed 는 판정에 쓰지 않는다 — 본측정 결과만 본다.
+    return { pass: badStatus === undefined, status: badStatus ?? statuses[statuses.length - 1], recovered, retrySkipped, measured, warmupExcluded: warmupFailed };
+  }
+
+  test('워밍업 실패 + 본측정 3회 정상 → PASS (기존엔 언어 전체 FAIL이던 케이스)', () => {
+    const r = judgeStep1(true, [{ first: 200 }, { first: 200 }, { first: 200 }]);
+    expect(r.pass).toBe(true);
+    expect(r.warmupExcluded).toBe(true);
+  });
+  test('본측정 5xx 샘플 → 재측정 회복 시 PASS + INFO 회복', () => {
+    const r = judgeStep1(false, [{ first: 200 }, { first: 503, retry: 200 }, { first: 200 }]);
+    expect(r.pass).toBe(true);
+    expect(r.recovered).toBe(true);
+  });
+  test('재측정도 5xx → FAIL (기존 판정 유지)', () => {
+    const r = judgeStep1(false, [{ first: 200 }, { first: 503, retry: 503 }, { first: 200 }]);
+    expect(r.pass).toBe(false);
+    expect(r.status).toBe(503);
+  });
+  test('본측정 4xx(404) 샘플은 재시도 없이 즉시 FAIL', () => {
+    const r = judgeStep1(false, [{ first: 404, retry: 200 }, { first: 200 }, { first: 200 }]);
+    expect(r.pass).toBe(false);   // retry 값이 있어도 쓰이지 않는다
+    expect(r.status).toBe(404);
+  });
+  test('예산 부족 시 재측정 생략 — 최초 실패로 확정 + retrySkipped', () => {
+    const r = judgeStep1(false, [{ first: 0, retry: 200 }], false);
+    expect(r.pass).toBe(false);
+    expect(r.retrySkipped).toBe('budget');
+  });
+
+  // 전면 장애 시 남은 샘플을 계속 돌리면 STEP1 혼자 전체 예산을 먹는다.
+  // 판정이 '하나라도 죽어 있으면 FAIL'이라 남은 측정은 결과를 바꾸지 못한다 → 조기 종료.
+  test('첫 샘플이 재시도 후에도 실패하면 남은 2회를 측정하지 않는다', () => {
+    const r = judgeStep1(false, [{ first: 0, retry: 0 }, { first: 200 }, { first: 200 }]);
+    expect(r.measured).toBe(1);
+    expect(r.pass).toBe(false);
+  });
+  test('4xx 확정 실패도 즉시 종료 (재시도·잔여 측정 모두 없음)', () => {
+    const r = judgeStep1(false, [{ first: 404 }, { first: 200 }, { first: 200 }]);
+    expect(r.measured).toBe(1);
+    expect(r.status).toBe(404);
+  });
+  test('재시도로 회복한 샘플은 종료 사유가 아니다 — 3회 모두 측정', () => {
+    const r = judgeStep1(false, [{ first: 503, retry: 200 }, { first: 200 }, { first: 200 }]);
+    expect(r.measured).toBe(3);
+    expect(r.pass).toBe(true);
+    expect(r.recovered).toBe(true);
+  });
+  test('두 번째 샘플에서 확정 실패 → 세 번째는 생략', () => {
+    const r = judgeStep1(false, [{ first: 200 }, { first: 503, retry: 503 }, { first: 200 }]);
+    expect(r.measured).toBe(2);
+    expect(r.pass).toBe(false);
+  });
+});
