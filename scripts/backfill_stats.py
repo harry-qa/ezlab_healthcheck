@@ -13,7 +13,8 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dashboard_metrics import (
-    classify_run, merge_bucket, vector_invariant_errors, vector_of,
+    classify_run, merge_bucket, vector_invariant_errors, vector_shape_errors,
+    vector_replaced, vector_of,
     STATS_SCHEMA_VERSION, VECTOR_KEYS, AVAILABLE, OUTAGE, INDETERMINATE,
 )
 
@@ -91,26 +92,54 @@ def _merge(existing, rebuilt):
 
     벡터를 항목별 max 로 섞으면 합이 실제 실행 수를 넘는 조합이 만들어진다
     (기존 가용 10 + 재구성 확인불가 10 → 합 20). 규칙은 dashboard_metrics.merge_bucket 하나에 둔다.
+    반환: (병합 결과, 재구성 벡터로 교체된 키 집합) — 교체된 구간만 합계 검증 대상이다.
     """
     out = {k: dict(v) for k, v in existing.items()}
+    replaced = set()
     for k, v in rebuilt.items():
-        out[k] = merge_bucket(out.get(k, {}), v)
-    return out
+        prev = out.get(k, {})
+        if vector_replaced(prev, v):
+            replaced.add(k)
+        out[k] = merge_bucket(prev, v)
+    return out, replaced
 
 
-daily_out   = dict(sorted(_merge(_load_root('daily-stats.json'), daily).items()))
-monthly_out = dict(sorted(_merge(_load_root('monthly-stats.json'), monthly).items()))
+daily_merged,   daily_replaced   = _merge(_load_root('daily-stats.json'), daily)
+monthly_merged, monthly_replaced = _merge(_load_root('monthly-stats.json'), monthly)
+daily_out   = dict(sorted(daily_merged.items()))
+monthly_out = dict(sorted(monthly_merged.items()))
 
 # ── 불변식 검증 ──────────────────────────────────────────────────
-# 이번 재구성이 '권위 있게' 본 구간(실행 폴더가 남아 있는 월·일)에서는
-# avail + outage + indet 가 실제로 본 실행 수와 정확히 같아야 한다.
-# 어긋나면 벡터가 오염된 것이므로 완료 표시를 남기지 않고 중단한다 —
-# 부분 마이그레이션 상태를 '정상'으로 표시하면 대시보드가 잘못된 가용률을 그린다.
-errors = (vector_invariant_errors({k: monthly_out[k] for k in runs_monthly}, runs_monthly)
-          + vector_invariant_errors({k: daily_out[k] for k in runs_daily}, runs_daily))
+# 1) 순수 재구성 결과(병합 전): 이번에 읽은 실행 폴더 수와 벡터합이 정확히 같아야 한다.
+#    분류 카운터와 실행 카운터가 한 몸으로 증가하므로 정상 코드에서는 반드시 성립한다.
+#    집계 루프를 손댔을 때 어긋남을 잡는 자리다.
+#    ※ 이 검사를 '병합 결과'에 걸면 안 된다 — prune 으로 폴더가 사라진 뒤 기존 벡터 100건을
+#      보존하고 남은 폴더 10건만 재구성한 정상 상황에서도 100 != 10 으로 실패한다.
+errors = (vector_invariant_errors(monthly, runs_monthly)
+          + vector_invariant_errors(daily, runs_daily))
 if errors:
-    print('ERROR: 서비스 분류 벡터 불변식 위반 (avail+outage+indet ≠ 실행 수)')
+    print('ERROR: 재구성 벡터 불변식 위반 (avail+outage+indet ≠ 이번에 읽은 실행 수)')
     for key, got, expected in errors[:10]:
+        print(f'  {key}: 벡터합 {got} · 기대 {expected}')
+    raise SystemExit(1)
+
+# 2) 병합 결과: 형태만 본다 — 재구성이 본 구간의 벡터가 완전한지, 음수가 섞이지 않았는지.
+#    보존 구간의 벡터는 과거 누적이라 이번 실행 수와 비교할 근거가 없다.
+shape_errors = (vector_shape_errors(monthly_out, required=runs_monthly)
+                + vector_shape_errors(daily_out, required=runs_daily))
+if shape_errors:
+    print('ERROR: 병합 결과 벡터 형태 오류 (불완전한 벡터 또는 음수)')
+    for key, reason in shape_errors[:10]:
+        print(f'  {key}: {reason}')
+    raise SystemExit(1)
+
+# 3) 재구성이 기존보다 크거나 같아 벡터를 '교체'한 구간만 병합 후에도 벡터합 == 실행 수여야 한다.
+#    (보존 구간은 대상이 아니다. 여기서 어긋나면 병합이 벡터를 통째로 옮기지 않고 섞은 것이다.)
+merged_errors = (vector_invariant_errors({k: monthly_out[k] for k in monthly_replaced}, runs_monthly)
+                 + vector_invariant_errors({k: daily_out[k] for k in daily_replaced}, runs_daily))
+if merged_errors:
+    print('ERROR: 교체 구간 벡터합 불일치 (병합이 벡터를 벡터 단위로 옮기지 않았다)')
+    for key, got, expected in merged_errors[:10]:
         print(f'  {key}: 벡터합 {got} · 기대 {expected}')
     raise SystemExit(1)
 

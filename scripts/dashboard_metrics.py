@@ -55,6 +55,19 @@ def vector_of(bucket_data):
         return None
 
 
+def vector_replaced(existing, rebuilt):
+    """이 구간에서 merge_bucket 이 재구성 벡터로 '교체'하는가(아니면 기존 벡터를 보존하는가).
+
+    교체 판정 규칙을 merge_bucket 과 백필 검증이 각자 다시 쓰면 둘이 어긋날 수 있어
+    한 함수로 둔다. 백필 검증은 '교체된 구간'에서만 벡터합 == 실행 수를 요구한다 —
+    보존된 구간의 벡터는 이번 재구성이 본 실행 수와 무관한 과거 누적이기 때문이다.
+    """
+    rb_vec = vector_of(rebuilt)
+    if rb_vec is None:
+        return False
+    return sum(rb_vec) >= sum(vector_of(existing) or (0, 0, 0))
+
+
 def merge_bucket(existing, rebuilt):
     """백필 병합 — PASS/WARN/FAIL 은 항목별 max(축소 방지), 서비스 분류는 '벡터 단위'로 처리.
 
@@ -65,10 +78,8 @@ def merge_bucket(existing, rebuilt):
     out = {k: v for k, v in existing.items()} if isinstance(existing, dict) else {}
     for field in ('PASS', 'WARN', 'FAIL'):
         out[field] = max(int(out.get(field, 0) or 0), int((rebuilt or {}).get(field, 0) or 0))
-    ex_vec = vector_of(existing) or (0, 0, 0)
-    rb_vec = vector_of(rebuilt)
-    if rb_vec is not None and sum(rb_vec) >= sum(ex_vec):
-        for key, value in zip(VECTOR_KEYS, rb_vec):
+    if vector_replaced(existing, rebuilt):
+        for key, value in zip(VECTOR_KEYS, vector_of(rebuilt)):
             out[key] = value
     elif vector_of(out) is None:
         # 어느 쪽에도 완전한 벡터가 없으면 키를 만들지 않는다 — 부분 키 상태를 남기지 않기 위함.
@@ -78,7 +89,13 @@ def merge_bucket(existing, rebuilt):
 
 
 def vector_invariant_errors(buckets, runs_seen):
-    """권위 있는 재구성 결과의 불변식 검사: avail + outage + indet == 실제 분류된 실행 수.
+    """벡터합 == 실행 수 검사: avail + outage + indet 가 분류된 실행 수와 정확히 같은가.
+
+    적용 대상은 '이번 재구성이 권위를 갖는' 벡터뿐이다.
+      · 병합 전 순수 재구성 결과 전체
+      · 병합 결과 중 재구성 벡터로 교체된 구간
+    병합 결과 전체에 걸면 안 된다 — prune 으로 폴더가 사라진 뒤 기존 벡터 100건을 보존하고
+    남은 폴더 10건만 재구성한 정상 상황에서도 100 != 10 으로 실패한다.
 
     반환: 위반 항목 [(키, 벡터합, 기대값)] — 비어 있으면 정상.
     """
@@ -90,6 +107,31 @@ def vector_invariant_errors(buckets, runs_seen):
             continue
         if vec is None or sum(vec) != expected:
             errors.append((key, None if vec is None else sum(vec), expected))
+    return errors
+
+
+def vector_shape_errors(buckets, required=()):
+    """병합 결과의 '구조' 검사 — 합계가 아니라 형태만 본다.
+
+    병합 결과에는 보존 구간(과거 누적)과 교체 구간(이번 재구성)이 섞여 있어 실행 수와의
+    합 일치를 요구할 수 없다. 대신 두 가지만 확인한다.
+      · required 구간(재구성이 실제로 본 월·일)의 벡터가 세 키 모두 있는 완전한 벡터인가
+      · 어느 벡터에도 음수가 섞이지 않았는가 (기존 파일 손상·수기 편집 방어)
+    required 밖에서 벡터가 아예 없는 것은 오류가 아니라 '부분 마이그레이션'이다 —
+    호출 측이 backfillComplete=False 로 표시하고 대시보드는 보수적 환산으로 폴백한다.
+
+    반환: 위반 항목 [(키, 사유)] — 비어 있으면 정상.
+    """
+    errors = []
+    required = set(required)
+    for key, data in buckets.items():
+        vec = vector_of(data)
+        if vec is None:
+            if key in required:
+                errors.append((key, '벡터 불완전 (세 키가 한 벌로 있어야 함)'))
+            continue
+        if any(v < 0 for v in vec):
+            errors.append((key, f'음수 값 {vec}'))
     return errors
 
 
