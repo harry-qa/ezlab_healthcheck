@@ -4,6 +4,12 @@ import * as path from 'path';
 import * as https from 'https';
 import * as tls from 'tls';
 import * as crypto from 'crypto';
+import {
+  diagnosticCardHtml,
+  makeResponseBodySnippet,
+  selectDiagnosticHeaders,
+  type DiagnosticRecord,
+} from './evidence';
 
 const SCREENSHOT_DIR = 'test-results/screenshots';
 fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
@@ -229,13 +235,10 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   // (Slack 장애 알림이 WARN 항목을 섞어 나열하던 문제 해결: report-status.json 소비 측에서 필터)
   // INFO = 기록은 남기되 런 상태·헬스 스코어에 반영하지 않는 정보성 등급(SLOW와 동일 취급).
   // 이지랩이 소유·수정할 수 없는 제3자 자원(외부 링크)이 여기 해당한다 — 남의 서버 장애로 우리 점수를 깎지 않는다.
-  type FailRecord = {
-    step: string; type: string; lang: string; url: string; status: number; responseTime: number;
-    symptom: string; timestamp: string; severity?: 'FAIL' | 'WARN' | 'INFO'; fingerprint?: string;
+  type FailRecord = DiagnosticRecord & {
+    fingerprint?: string;
     // 재시도 대상(5xx·응답없음)이었지만 예산 게이트에 걸려 재시도 없이 최초 실패로 확정된 기록.
     retrySkipped?: 'budget';
-    // 진단 카드에 싣는 부가 정보 — 있으면 채우고 없으면 비운다.
-    contentType?: string; contentRange?: string; netError?: string;
     // 증거 — 모든 FAIL·WARN에 evidencePath 가 있어야 한다(INFO 외부 링크는 예외).
     evidenceType?: 'page' | 'element' | 'diagnostic';
     evidencePath?: string;
@@ -551,48 +554,12 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
 
   // 화면에 나타나지 않는 장애용 진단 카드.
   // 운영 페이지를 이동시키면 안 되므로 별도 페이지에서 setContent()로 렌더한다(네트워크 요청 없음).
-  function diagnosticCardHtml(rec: FailRecord): string {
-    const esc = (v: unknown) => String(v ?? '-')
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const sev = rec.severity ?? 'FAIL';
-    const color = sev === 'FAIL' ? '#e5534b' : sev === 'WARN' ? '#d29922' : '#58a6ff';
-    const rows: [string, unknown][] = [
-      ['STEP', rec.step],
-      ['유형', `${rec.type} · ${sev}`],
-      ['URL', rec.url],
-      ['HTTP 상태', rec.status === 0 ? '응답 없음 (0)' : rec.status],
-      ['증상', rec.symptom],
-      ['언어', rec.lang],
-      ['감지 시각', rec.timestamp],
-      ['응답 시간', rec.responseTime ? `${rec.responseTime}ms` : '-'],
-      ['Content-Type', rec.contentType],
-      ['Content-Range', rec.contentRange],
-      ['네트워크 오류', rec.netError],
-      ['실행 ID', RUN_ID],
-    ];
-    return `<!doctype html><meta charset="utf-8"><body style="margin:0;background:#0d1117;
-      font:14px/1.6 -apple-system,'Segoe UI',Roboto,'Noto Sans KR',sans-serif;color:#c9d1d9">
-      <div style="max-width:900px;margin:24px auto;border:1px solid #30363d;border-radius:10px;overflow:hidden">
-        <div style="background:${color};color:#fff;padding:14px 20px;font-size:17px;font-weight:700">
-          이지랩 헬스체크 · ${esc(sev)} 진단 카드
-        </div>
-        <table style="width:100%;border-collapse:collapse">
-          ${rows.map(([k, v], i) => `<tr style="background:${i % 2 ? '#161b22' : '#0d1117'}">
-            <td style="padding:10px 20px;color:#8b949e;white-space:nowrap;vertical-align:top;width:150px">${esc(k)}</td>
-            <td style="padding:10px 20px;word-break:break-all">${esc(v)}</td></tr>`).join('')}
-        </table>
-        <div style="padding:10px 20px;color:#8b949e;font-size:12px;border-top:1px solid #30363d">
-          화면으로 확인할 수 없는 장애(API·파일·인증서·메타 이미지·네트워크·예산)라 진단 카드로 남깁니다.
-        </div>
-      </div></body>`;
-  }
-
   // 진단 카드 렌더링용 페이지 — 여러 건이 공유한다(건마다 페이지를 열면 비용이 크다).
   let diagPage: import('@playwright/test').Page | null = null;
   async function renderDiagnostic(rec: FailRecord): Promise<{ type: 'diagnostic'; path: string } | null> {
     try {
       if (!diagPage) diagPage = await page.context().newPage();
-      await diagPage.setContent(diagnosticCardHtml(rec), { waitUntil: 'load', timeout: 10000 });
+      await diagPage.setContent(diagnosticCardHtml(rec, RUN_ID), { waitUntil: 'load', timeout: 10000 });
       const label = `진단_${rec.type}_${rec.status}_${safeName(rec.url).slice(0, 40)}`;
       const filePath = path.join(SCREENSHOT_DIR, `diag-${safeName(label)}-${Date.now()}.png`);
       await diagPage.screenshot({ path: filePath, fullPage: true });
@@ -1205,8 +1172,24 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   //   requestUrl       : 실제 요청한 URL — 판정·능동 검증 완료 여부의 키
   // Next 이미지 프록시는 폭(w=32/w=3840)마다 URL이 달라 특정 폭만 실패할 수 있으므로,
   // 검증 완료 여부를 원본 단위로 잡으면 실패를 놓친다 → requestUrl 단위로 관리한다.
-  type ImgResult = { status: number; contentType: string; ok: boolean; note: string; source: string };
-  type ImgObs = { langs: Set<string>; metaKinds: Set<string>; results: Map<string, ImgResult> };
+  type ImgResult = {
+    status: number;
+    contentType: string;
+    contentRange: string;
+    ok: boolean;
+    note: string;
+    source: string;
+    responseHeaders: Record<string, string>;
+    responseBodySnippet?: string;
+    responseBodyBytes?: number;
+    netError?: string;
+  };
+  type ImgObs = {
+    langs: Set<string>;
+    metaKinds: Set<string>;
+    referencePages: Set<string>;
+    results: Map<string, ImgResult>;
+  };
   const imgObservations = new Map<string, ImgObs>();
   const imgActiveVerified = new Set<string>(); // requestUrl 기준
 
@@ -1217,7 +1200,10 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
 
   const obsOf = (assetUrl: string): ImgObs => {
     let o = imgObservations.get(assetUrl);
-    if (!o) { o = { langs: new Set(), metaKinds: new Set(), results: new Map() }; imgObservations.set(assetUrl, o); }
+    if (!o) {
+      o = { langs: new Set(), metaKinds: new Set(), referencePages: new Set(), results: new Map() };
+      imgObservations.set(assetUrl, o);
+    }
     return o;
   };
   const isImageContentType = (ct: string) => /^image\//i.test(ct.split(';')[0].trim());
@@ -1228,25 +1214,47 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
     try {
       const res = await page.request.get(requestUrl, { headers: headersFor(requestUrl), timeout: 8000 });
       const status = res.status();
-      const ct = String(res.headers()['content-type'] ?? '');
+      const rawHeaders = res.headers();
+      const ct = String(rawHeaders['content-type'] ?? '');
+      const cr = String(rawHeaders['content-range'] ?? '');
+      const body = await res.body();
+      const responseHeaders = selectDiagnosticHeaders(rawHeaders);
       let ok = false;
       let note = '';
       if (status === 200 || status === 206) {
-        const cr = String(res.headers()['content-range'] ?? '');
         if (!isImageContentType(ct)) {
           note = `Content-Type 이상: ${ct || '(없음)'}`;
         } else if (status === 206 && !/^bytes\s+\d+-\d+\/\d+/i.test(cr)) {
           // 206인데 Content-Range가 없거나 형식이 깨졌으면 부분 응답으로 신뢰할 수 없다.
           note = `206인데 Content-Range 이상: "${cr || '(없음)'}"`;
         } else {
-          const len = (await res.body()).length;
-          if (len === 0) note = '본문 크기 0';
+          if (body.length === 0) note = '본문 크기 0';
           else ok = true;
         }
       }
-      return { status, contentType: ct, ok, note, source };
-    } catch {
-      return { status: 0, contentType: '', ok: false, note: '접근 불가 / 타임아웃', source };
+      return {
+        status,
+        contentType: ct,
+        contentRange: cr,
+        ok,
+        note,
+        source,
+        responseHeaders,
+        responseBodySnippet: ok ? undefined : makeResponseBodySnippet(body, ct, status),
+        responseBodyBytes: body.length,
+      };
+    } catch (error) {
+      const netError = (error as Error).message.split('\n')[0].slice(0, 240);
+      return {
+        status: 0,
+        contentType: '',
+        contentRange: '',
+        ok: false,
+        note: '접근 불가 / 타임아웃',
+        source,
+        responseHeaders: {},
+        netError,
+      };
     }
   }
 
@@ -1309,7 +1317,15 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
         //
         // 네트워크 이미지 감시 핸들러는 반드시 진입 전에 붙이고, 관찰이 끝나면 이 핸들러만 제거한다.
         // 두 핸들러 모두 동기 기록만 하므로 별도 flush가 필요 없다.
-        const netFailures: { url: string; status: number; contentType: string; note: string }[] = [];
+        const netFailures: {
+          url: string;
+          status: number;
+          contentType: string;
+          contentRange: string;
+          note: string;
+          responseHeaders: Record<string, string>;
+          netError?: string;
+        }[] = [];
         const onResponse = (res: import('@playwright/test').Response) => {
           const req = res.request();
           if (req.resourceType() !== 'image') return;
@@ -1319,7 +1335,15 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
           // 3xx는 최종 응답에서 다시 잡히고, 304는 정상 재검증(본문 없음이 정상이라 크기·타입 검사 대상 아님)
           if (st >= 300 && st < 400) return;
           if (st === 200 || st === 206) return;
-          netFailures.push({ url, status: st, contentType: String(res.headers()['content-type'] ?? ''), note: '' });
+          const rawHeaders = res.headers();
+          netFailures.push({
+            url,
+            status: st,
+            contentType: String(rawHeaders['content-type'] ?? ''),
+            contentRange: String(rawHeaders['content-range'] ?? ''),
+            note: '',
+            responseHeaders: selectDiagnosticHeaders(rawHeaders),
+          });
         };
         const onRequestFailed = (req: import('@playwright/test').Request) => {
           if (req.resourceType() !== 'image') return;
@@ -1329,7 +1353,15 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
           const err = req.failure()?.errorText ?? '';
           // 브라우저가 스스로 취소한 요청(ERR_ABORTED 등)은 장애가 아니다 — 실제 네트워크 실패만 센다.
           if (!REAL_NET_FAILURE_RE.test(err)) return;
-          netFailures.push({ url, status: 0, contentType: '', note: err || '연결 실패' });
+          netFailures.push({
+            url,
+            status: 0,
+            contentType: '',
+            contentRange: '',
+            note: err || '연결 실패',
+            responseHeaders: {},
+            netError: err || '연결 실패',
+          });
         };
         page.on('response', onResponse);
         page.on('requestfailed', onRequestFailed);
@@ -1396,10 +1428,17 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
             const { fetchUrl, displayUrl } = normalizeImageUrl(f.url, baseUrl);
             const o = obsOf(displayUrl);
             o.langs.add(lang);
+            o.referencePages.add(targetUrl);
             imgActiveVerified.add(fetchUrl); // 재요청 금지
             o.results.set(fetchUrl, {
-              status: f.status, contentType: f.contentType, ok: false, source: 'network',
+              status: f.status,
+              contentType: f.contentType,
+              contentRange: f.contentRange,
+              ok: false,
+              source: 'network',
               note: f.status === 0 ? `네트워크 실패 (${f.note})` : '',
+              responseHeaders: f.responseHeaders,
+              netError: f.netError,
             });
           }
 
@@ -1438,6 +1477,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
             const o = obsOf(displayUrl);
             o.langs.add(lang);
             o.metaKinds.add(m.kind);
+            o.referencePages.add(targetUrl);
             if (!isOwnHost(fetchUrl)) continue;
             await verifyImage(displayUrl, fetchUrl, 'meta');
           }
@@ -1465,6 +1505,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
             const { fetchUrl, displayUrl } = normalizeImageUrl(src, baseUrl);
             const o = obsOf(displayUrl);
             o.langs.add(lang);
+            o.referencePages.add(targetUrl);
             if (!isOwnHost(fetchUrl)) continue;
             await verifyImage(displayUrl, fetchUrl, 'dom');
             // 판정은 STEP6 집계에서 나지만 그때는 이미 다른 페이지로 이동한 뒤다.
@@ -1496,10 +1537,17 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
             const { fetchUrl, displayUrl } = normalizeImageUrl(f.url, baseUrl);
             const o = obsOf(displayUrl);
             o.langs.add(lang);
+            o.referencePages.add(targetUrl);
             imgActiveVerified.add(fetchUrl);
             o.results.set(fetchUrl, {
-              status: f.status, contentType: f.contentType, ok: false, source: 'network',
+              status: f.status,
+              contentType: f.contentType,
+              contentRange: f.contentRange,
+              ok: false,
+              source: 'network',
               note: f.status === 0 ? `네트워크 실패 (${f.note})` : '',
+              responseHeaders: f.responseHeaders,
+              netError: f.netError,
             });
           }
         }
@@ -1569,10 +1617,24 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
       const symptom = first.status === 0
         ? `이미지 접근 불가${first.note ? ` (${first.note})` : ''}${where ? ` — ${where}` : ''}`
         : `이미지 로드 실패 (HTTP ${first.status})${first.note ? ` · ${first.note}` : ''}${where ? ` — ${where}` : ''}`;
+      const diagnosticDetails = failed.map(([requestUrl, result]) => [
+        `[${result.source}] ${requestUrl}`,
+        result.status === 0 ? '응답 없음' : `HTTP ${result.status}`,
+        result.contentType ? `Content-Type ${result.contentType}` : '',
+        result.note,
+      ].filter(Boolean).join(' · '));
       console.log(`[WARN][이미지] ${first.status} ${assetUrl} — ${symptom} @ ${ts}`);
       await recordIssue({
         step: 'STEP6·이미지', type: '이미지', lang: [...o.langs].join(',') || '-',
         url: assetUrl, status: first.status, responseTime: 0, symptom, timestamp: ts, severity: 'WARN',
+        contentType: first.contentType || undefined,
+        contentRange: first.contentRange || undefined,
+        netError: first.netError,
+        responseHeaders: first.responseHeaders,
+        responseBodySnippet: first.responseBodySnippet,
+        responseBodyBytes: first.responseBodyBytes,
+        referencePages: [...o.referencePages].sort(),
+        diagnosticDetails,
       });
     }
   });
@@ -2315,13 +2377,21 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
     for (const r of intermittentRecoveries) await recordIssue(r);
     const recoveryFingerprints = new Set(intermittentRecoveries.map(r => r.fingerprint ?? fingerprintOf(r)));
     const targets = [...new Set(intermittentRecoveries.map(r => r.url))].join(', ');
+    const recoveryDetails = intermittentRecoveries.map((recovery, index) => [
+      `[${index + 1}] ${recovery.step} · ${recovery.lang}`,
+      recovery.url,
+      recovery.symptom,
+    ].join('\n'));
     if (recoveryFingerprints.size >= INTERMITTENT_WARN_THRESHOLD) {
       warnCount++;
       const ts = kstNow();
       const symptom = `오리진 간헐 불안정 — 재시도 회복 ${intermittentRecoveries.length}건 · 지문 ${recoveryFingerprints.size}종 (임계 ${INTERMITTENT_WARN_THRESHOLD}종)`;
       console.log(`[WARN][간헐] ${symptom}: ${targets} @ ${ts}`);
       // 종합 1건(WARN) + 개별 근거(INFO)를 함께 남겨 개발팀이 어느 경로가 흔들렸는지 볼 수 있게 한다.
-      await recordIssue({ step: '간헐·종합', type: '간헐', lang: '-', url: baseUrl, status: 200, responseTime: 0, symptom, timestamp: ts, severity: 'WARN' });
+      await recordIssue({
+        step: '간헐·종합', type: '간헐', lang: '-', url: baseUrl, status: 200, responseTime: 0,
+        symptom, timestamp: ts, severity: 'WARN', diagnosticDetails: recoveryDetails,
+      });
     } else {
       // 지문 1종은 정상 범위(단일 경로 순간 지연) — 런 상태를 바꾸지 않되 추이 관찰용으로 로그만 남긴다.
       console.log(`[INFO][간헐] 재시도 회복 ${intermittentRecoveries.length}건 · 지문 ${recoveryFingerprints.size}종 (임계 ${INTERMITTENT_WARN_THRESHOLD}종 미만 → 런 상태 미반영): ${targets}`);
