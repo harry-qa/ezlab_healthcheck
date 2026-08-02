@@ -18,6 +18,80 @@ AVAILABLE     = '가용'
 OUTAGE        = '장애'
 INDETERMINATE = '확인불가'
 
+# 월별·일별 집계에 담기는 서비스 분류 벡터의 키. 셋은 항상 '한 벌'로 다룬다.
+VECTOR_KEYS = ('avail', 'outage', 'indet')
+
+# 집계 스키마 버전. 서비스 분류 벡터(avail/outage/indet)가 들어간 버전이 2다.
+# 부분 마이그레이션 상태(일부 월에만 벡터가 있는 상태)를 정상 데이터로 읽으면
+# 백필 전 월은 0% 같은 엉뚱한 가용률로 표시된다 → 완료 표시가 있을 때만 벡터를 신뢰한다.
+STATS_SCHEMA_VERSION = 2
+
+
+def is_migrated(meta):
+    """집계 파일이 서비스 분류 벡터를 신뢰할 수 있는 상태인지.
+
+    백필이 전 구간을 재구성하고 stats-meta.json 에 완료 표시를 남겼을 때만 True.
+    False 면 월별 지표는 벡터를 쓰지 않고 보수적 환산(WARN=확인 불가)으로 통일한다 —
+    마이그레이션된 월과 안 된 월을 섞어 보여주는 것이 가장 위험하다.
+    """
+    if not isinstance(meta, dict):
+        return False
+    try:
+        version = int(meta.get('schemaVersion', 0))
+    except (TypeError, ValueError):
+        return False
+    return version >= STATS_SCHEMA_VERSION and meta.get('backfillComplete') is True
+
+
+def vector_of(bucket_data):
+    """집계 dict 에서 서비스 분류 벡터를 꺼낸다. 키가 하나라도 없으면 None(불완전)."""
+    if not isinstance(bucket_data, dict):
+        return None
+    if not all(k in bucket_data for k in VECTOR_KEYS):
+        return None
+    try:
+        return tuple(int(bucket_data[k]) for k in VECTOR_KEYS)
+    except (TypeError, ValueError):
+        return None
+
+
+def merge_bucket(existing, rebuilt):
+    """백필 병합 — PASS/WARN/FAIL 은 항목별 max(축소 방지), 서비스 분류는 '벡터 단위'로 처리.
+
+    벡터를 항목별 max 로 섞으면 avail+outage+indet 가 실제 실행 수와 어긋난 조합이 만들어진다
+    (예: 기존 가용 10·확인불가 0 과 재구성 가용 0·확인불가 10 을 섞으면 합이 20이 된다).
+    → 재구성이 더 많은 실행을 본 경우에만 벡터를 통째로 교체하고, 아니면 통째로 보존한다.
+    """
+    out = {k: v for k, v in existing.items()} if isinstance(existing, dict) else {}
+    for field in ('PASS', 'WARN', 'FAIL'):
+        out[field] = max(int(out.get(field, 0) or 0), int((rebuilt or {}).get(field, 0) or 0))
+    ex_vec = vector_of(existing) or (0, 0, 0)
+    rb_vec = vector_of(rebuilt)
+    if rb_vec is not None and sum(rb_vec) >= sum(ex_vec):
+        for key, value in zip(VECTOR_KEYS, rb_vec):
+            out[key] = value
+    elif vector_of(out) is None:
+        # 어느 쪽에도 완전한 벡터가 없으면 키를 만들지 않는다 — 부분 키 상태를 남기지 않기 위함.
+        for key in VECTOR_KEYS:
+            out.pop(key, None)
+    return out
+
+
+def vector_invariant_errors(buckets, runs_seen):
+    """권위 있는 재구성 결과의 불변식 검사: avail + outage + indet == 실제 분류된 실행 수.
+
+    반환: 위반 항목 [(키, 벡터합, 기대값)] — 비어 있으면 정상.
+    """
+    errors = []
+    for key, data in buckets.items():
+        vec = vector_of(data)
+        expected = runs_seen.get(key)
+        if expected is None:
+            continue
+        if vec is None or sum(vec) != expected:
+            errors.append((key, None if vec is None else sum(vec), expected))
+    return errors
+
 
 def classify_run(status, coverage):
     """런 하나를 '서비스 관점'으로 분류한다.
@@ -142,18 +216,20 @@ def current_state(status, coverage, open_warn_count):
     return '서비스 정상', 'pass'
 
 
-def month_buckets(month_data):
-    """월별 카드용 버킷. 새 집계 키가 있으면 그것을 쓰고, 없으면 보수적으로 환산한다.
+def month_buckets(month_data, migrated=False):
+    """월별 카드용 버킷.
 
-    과거 월에는 완주 여부 기록이 없다. 그 WARN 을 가용으로 세면 없는 근거로 가용률을
-    올리는 셈이라, 규칙대로 전부 확인 불가로 둔다(가용률은 PASS 와 FAIL 로만 계산된다).
+    migrated=True(백필 완료 표시 있음)이고 그 월의 벡터가 '완전할 때만' 새 키를 쓴다.
+    부분 마이그레이션 상태에서 있는 월만 벡터를 쓰면 백필 전 월이 0% 로 표시돼
+    "그 달에 서비스가 죽어 있었다"는 잘못된 결론이 나온다 → 섞지 않는다.
+
+    폴백은 보수적 환산이다. 과거 월에는 완주 여부 기록이 없고, 그 WARN 을 가용으로 세면
+    없는 근거로 가용률을 올리는 셈이라 전부 확인 불가로 둔다(가용률은 PASS·FAIL 로만 계산).
     """
-    if 'avail' in month_data or 'outage' in month_data or 'indet' in month_data:
-        return {
-            AVAILABLE:     month_data.get('avail', 0),
-            OUTAGE:        month_data.get('outage', 0),
-            INDETERMINATE: month_data.get('indet', 0),
-        }
+    if migrated:
+        vec = vector_of(month_data)
+        if vec is not None:
+            return {AVAILABLE: vec[0], OUTAGE: vec[1], INDETERMINATE: vec[2]}
     return {
         AVAILABLE:     month_data.get('PASS', 0),
         OUTAGE:        month_data.get('FAIL', 0),

@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dashboard_metrics import (
     AVAILABLE, OUTAGE, INDETERMINATE,
     classify_counts, availability, completion_rate, no_warning_rate,
-    open_quality_warnings, current_state, month_buckets,
+    open_quality_warnings, current_state, month_buckets, is_migrated,
 )
 
 # ── CLI args ──────────────────────────────────────────────────────────
@@ -26,6 +26,10 @@ output_file   = sys.argv[8]
 # 런별 점검 완주 여부. 없으면 빈 dict — 그 경우 WARN 은 전부 '확인 불가'로 분류된다
 # (완주 여부를 모르는데 가용으로 세면 없는 근거로 가용률을 부풀리게 된다).
 coverage_file = sys.argv[9] if len(sys.argv) > 9 else None
+# 집계 스키마 상태(stats-meta.json). 백필 완료 표시가 없으면 월별 지표는 서비스 분류 벡터를
+# 쓰지 않고 보수적 환산으로 통일한다 — 일부 월에만 벡터가 있는 상태를 정상 데이터로 읽으면
+# 백필 전 월이 0% 로 표시돼 '그 달에 서비스가 죽어 있었다'는 잘못된 결론이 나온다.
+meta_file     = sys.argv[10] if len(sys.argv) > 10 else None
 
 # ── Load data ─────────────────────────────────────────────────────────
 with open(runs_file) as f:
@@ -51,6 +55,8 @@ failures_history = load_json(failures_file, {})
 coverage_map     = load_json(coverage_file, {}) if coverage_file else {}
 if not isinstance(coverage_map, dict):
     coverage_map = {}
+stats_meta       = load_json(meta_file, {}) if meta_file else {}
+stats_migrated   = is_migrated(stats_meta)
 
 # ── Constants ─────────────────────────────────────────────────────────
 LANGS       = ['ko', 'en', 'jp', 'tw']
@@ -378,12 +384,19 @@ def make_donut_svg(avail_n, outage_n, indet_n, rate):
               f'fill="#e6edf3">{label}</text>')
     return f'<svg viewBox="0 0 100 100" width="88" height="88">{"".join(segs)}{center}</svg>'
 
+# 마이그레이션이 끝나지 않았으면 화면에 그 사실을 적는다 — 숫자만 보면 보수적 환산값을
+# 서비스 가용률로 오해한다(백필 전 WARN 이 전부 확인 불가로 잡혀 실제보다 낮게 나온다).
+monthly_note = ('<span class="section-sub">서비스 가용률</span>' if stats_migrated else
+                '<span class="section-sub section-sub--warn">서비스 가용률 · 집계 마이그레이션 전 —'
+                ' WARN 을 전부 확인 불가로 환산한 보수적 값입니다'
+                ' (<code>scripts/backfill_stats.py</code> 실행 필요)</span>')
+
 monthly_cards_html = ''
 if monthly_stats:
     for m in sorted(monthly_stats.keys(), reverse=True):
         d = monthly_stats[m]
         w = d.get('WARN', 0)
-        b = month_buckets(d)
+        b = month_buckets(d, stats_migrated)
         a_n, o_n, i_n = b[AVAILABLE], b[OUTAGE], b[INDETERMINATE]
         total_m = a_n + o_n + i_n
         rate_m = availability(b)
@@ -696,6 +709,8 @@ css = """
   .leg-indet { font-size: .65rem; font-weight: 600; padding: 2px 6px; border-radius: 6px;
                background: #21262d; color: #8b949e; }
   .month-sub { font-size: .62rem; color: #6e7681; margin-top: 4px; }
+  .section-sub--warn { color: #d29922; }
+  .section-sub--warn code { background: #21262d; padding: 1px 5px; border-radius: 4px; }
   .month-total { font-size: .65rem; color: #484f58; margin-top: 5px; }
 
   /* 지표 설명 · 보조 지표 */
@@ -974,7 +989,7 @@ html = f"""<!DOCTYPE html>
     {heatmap_svg}
   </div>
 
-  {'<div class="card"><div class="section-title">월별 요약</div><div class="monthly-grid">' + monthly_cards_html + '</div></div>' if monthly_cards_html else ''}
+  {'<div class="card"><div class="section-title">월별 요약' + monthly_note + '</div><div class="monthly-grid">' + monthly_cards_html + '</div></div>' if monthly_cards_html else ''}
 
   <div class="report-card">
     <div class="filter-bar">

@@ -7,9 +7,10 @@ CI 는 test_fail_streak.py 와 같은 자리에서 이 파일을 실행한다.
 import sys
 
 from dashboard_metrics import (
-    AVAILABLE, OUTAGE, INDETERMINATE,
+    AVAILABLE, OUTAGE, INDETERMINATE, VECTOR_KEYS, STATS_SCHEMA_VERSION,
     classify_run, classify_counts, availability, completion_rate, no_warning_rate,
-    open_quality_warnings, current_state, month_buckets,
+    open_quality_warnings, current_state, month_buckets, is_migrated,
+    vector_of, merge_bucket, vector_invariant_errors,
 )
 
 failures = []
@@ -135,16 +136,61 @@ check('미완주 PASS → 확인 불가', current_state('PASS', False, 0), ('점
 check('완주 WARN → 정상 + 경고 건수', current_state('WARN', True, 2), ('서비스 정상 · 품질 경고 2건', 'warn'))
 check('완주 PASS → 서비스 정상', current_state('PASS', True, 0), ('서비스 정상', 'pass'))
 
+print("\n== 마이그레이션 상태 판정 ==")
+DONE = {'schemaVersion': STATS_SCHEMA_VERSION, 'backfillComplete': True}
+check('완료 표시가 있으면 마이그레이션됨', is_migrated(DONE), True)
+check('완료 표시가 없으면 미마이그레이션', is_migrated({'schemaVersion': 2}), False)
+check('backfillComplete=False 는 부분 마이그레이션', is_migrated({'schemaVersion': 2, 'backfillComplete': False}), False)
+check('구버전 스키마는 미마이그레이션', is_migrated({'schemaVersion': 1, 'backfillComplete': True}), False)
+check('메타 파일이 없으면 미마이그레이션', is_migrated({}), False)
+check('메타가 dict 가 아니면 미마이그레이션', is_migrated(['x']), False)
+check('schemaVersion 이 숫자가 아니어도 죽지 않음', is_migrated({'schemaVersion': 'v2', 'backfillComplete': True}), False)
+
 print("\n== 월별 버킷 ==")
-check('새 집계 키가 있으면 그대로 사용',
-      month_buckets({'PASS': 1, 'WARN': 2, 'FAIL': 3, 'avail': 10, 'outage': 1, 'indet': 4}),
-      {AVAILABLE: 10, OUTAGE: 1, INDETERMINATE: 4})
+MIGRATED_MONTH = {'PASS': 1, 'WARN': 2, 'FAIL': 3, 'avail': 10, 'outage': 1, 'indet': 4}
+check('마이그레이션 완료 + 완전한 벡터 → 벡터 사용',
+      month_buckets(MIGRATED_MONTH, migrated=True), {AVAILABLE: 10, OUTAGE: 1, INDETERMINATE: 4})
+# 부분 마이그레이션 방어: 완료 표시가 없으면 벡터가 있어도 쓰지 않는다.
+check('미마이그레이션이면 벡터가 있어도 보수적 환산 (부분 마이그레이션을 정상 데이터로 읽지 않음)',
+      month_buckets(MIGRATED_MONTH, migrated=False), {AVAILABLE: 1, OUTAGE: 3, INDETERMINATE: 2})
+check('완료 표시가 있어도 벡터가 불완전하면 폴백 (부분 키 상태 방어)',
+      month_buckets({'PASS': 5, 'WARN': 2, 'FAIL': 1, 'avail': 5}, migrated=True),
+      {AVAILABLE: 5, OUTAGE: 1, INDETERMINATE: 2})
 check('과거 월은 WARN 을 확인 불가로 환산 (없는 근거로 가용률을 올리지 않는다)',
-      month_buckets({'PASS': 368, 'WARN': 30, 'FAIL': 6}),
+      month_buckets({'PASS': 368, 'WARN': 30, 'FAIL': 6}, migrated=True),
       {AVAILABLE: 368, OUTAGE: 6, INDETERMINATE: 30})
 check('과거 월 가용률은 PASS 와 FAIL 로만 계산',
-      availability(month_buckets({'PASS': 368, 'WARN': 30, 'FAIL': 6})), 98.4)
-check('빈 월은 None', availability(month_buckets({})), None)
+      availability(month_buckets({'PASS': 368, 'WARN': 30, 'FAIL': 6}, migrated=True)), 98.4)
+check('빈 월은 None', availability(month_buckets({}, migrated=True)), None)
+
+print("\n== 서비스 분류 벡터 (병합·불변식) ==")
+check('벡터가 완전하면 튜플로 반환', vector_of({'avail': 3, 'outage': 1, 'indet': 2}), (3, 1, 2))
+check('키가 하나라도 없으면 None (부분 키는 벡터가 아니다)', vector_of({'avail': 3, 'outage': 1}), None)
+check('값이 숫자가 아니면 None', vector_of({'avail': 'x', 'outage': 1, 'indet': 2}), None)
+
+# 항목별 max 로 섞으면 합이 실제 실행 수를 넘는다 — 벡터 단위 교체·보존이어야 한다.
+merged = merge_bucket({'PASS': 10, 'WARN': 0, 'FAIL': 0, 'avail': 10, 'outage': 0, 'indet': 0},
+                      {'PASS': 0, 'WARN': 10, 'FAIL': 0, 'avail': 0, 'outage': 0, 'indet': 10})
+check('벡터는 항목별 max 로 섞이지 않는다 (합이 20이 되면 안 됨)',
+      sum(vector_of(merged)), 10)
+check('재구성이 더 많이 봤으면 벡터 전체 교체', vector_of(merged), (0, 0, 10))
+check('원본 카운트는 축소 방지 max 유지', (merged['PASS'], merged['WARN']), (10, 10))
+
+kept = merge_bucket({'PASS': 50, 'WARN': 0, 'FAIL': 0, 'avail': 50, 'outage': 0, 'indet': 0},
+                    {'PASS': 2, 'WARN': 0, 'FAIL': 0, 'avail': 2, 'outage': 0, 'indet': 0})
+check('재구성이 적게 봤으면(prune 구간) 기존 벡터 통째로 보존', vector_of(kept), (50, 0, 0))
+
+part = merge_bucket({'PASS': 5, 'WARN': 1, 'FAIL': 0}, {'PASS': 5, 'WARN': 1, 'FAIL': 0})
+check('양쪽에 벡터가 없으면 부분 키를 만들지 않는다',
+      [k for k in VECTOR_KEYS if k in part], [])
+
+check('불변식 통과 — 벡터합이 실행 수와 일치',
+      vector_invariant_errors({'2026-08': {'avail': 19, 'outage': 1, 'indet': 3}}, {'2026-08': 23}), [])
+check('불변식 위반 — 벡터합이 실행 수와 다름',
+      vector_invariant_errors({'2026-08': {'avail': 19, 'outage': 1, 'indet': 3}}, {'2026-08': 24}),
+      [('2026-08', 23, 24)])
+check('불변식 위반 — 벡터 자체가 없음',
+      vector_invariant_errors({'2026-08': {'PASS': 5}}, {'2026-08': 5}), [('2026-08', None, 5)])
 
 
 # ── update_statuses.py 통합 검증 ───────────────────────────────────
@@ -192,8 +238,10 @@ for _n in ('statuses.json', 'monthly-stats.json', 'daily-stats.json', 'coverage.
         _BACKUP[_p] = open(_p).read()
 
 
-def run_updates_tmp(rows, seed_coverage=None):
-    for name, init in (('statuses.json', '{}'), ('monthly-stats.json', '{}'), ('daily-stats.json', '{}')):
+def run_updates_tmp(rows, seed_coverage=None, seed_monthly=None, seed_statuses=None):
+    for name, init in (('statuses.json', seed_statuses or '{}'),
+                       ('monthly-stats.json', seed_monthly or '{}'),
+                       ('daily-stats.json', '{}')):
         open(f'/tmp/{name}', 'w').write(init)
     if seed_coverage is None:
         if _os.path.exists('/tmp/coverage.json'):
@@ -208,25 +256,57 @@ def run_updates_tmp(rows, seed_coverage=None):
             ('statuses.json', 'monthly-stats.json', 'daily-stats.json', 'coverage.json')}
 
 
+def month(res):
+    return res['monthly-stats.json']['2026-08']
+
+
+def vec(res):
+    return vector_of(month(res))
+
+
 try:
-    # 1) 같은 실행 ID 를 다시 처리해도 누적이 늘지 않는다 (workflow_dispatch 가 스케줄과 같은 분에 겹치는 경우)
+    # 1) 같은 실행 ID·같은 값 재처리는 완전한 no-op
     once = run_updates_tmp([('2026-08-02_10-00', 'WARN', 'true')])
     twice = run_updates_tmp([('2026-08-02_10-00', 'WARN', 'true'),
                              ('2026-08-02_10-00', 'WARN', 'true')])
-    check('동일 실행 ID 재처리 — 월별 원본 카운트 불변',
-          twice['monthly-stats.json']['2026-08'], once['monthly-stats.json']['2026-08'])
-    check('동일 실행 ID 재처리 — 일별 누적 불변',
+    check('동일 ID·동일 값 재처리 — 월별 전체가 완전한 no-op', month(twice), month(once))
+    check('동일 ID·동일 값 재처리 — 일별 전체가 완전한 no-op',
           twice['daily-stats.json']['2026-08-02'], once['daily-stats.json']['2026-08-02'])
-    check('동일 실행 ID 재처리 — 서비스 버킷도 1회만 집계',
-          (twice['monthly-stats.json']['2026-08'].get('avail', 0),
-           twice['monthly-stats.json']['2026-08'].get('WARN', 0)), (1, 1))
+    check('동일 ID·동일 값 재처리 — coverage.json 도 동일',
+          twice['coverage.json'], once['coverage.json'])
 
-    # 2) 상태 변화로 재처리해도 (재실행) 누적이 이중으로 늘지 않는다
-    changed = run_updates_tmp([('2026-08-02_10-00', 'WARN', 'true'),
-                               ('2026-08-02_10-00', 'PASS', 'true')])
-    total = sum(changed['monthly-stats.json']['2026-08'].get(k, 0) for k in ('PASS', 'WARN', 'FAIL'))
-    check('같은 ID 를 다른 상태로 재처리해도 누적 총합은 1', total, 1)
-    check('최신 상태로 덮어쓴다', changed['statuses.json']['2026-08-02_10-00'], 'PASS')
+    # 2) upsert — 이전 분류를 회수하고 새 분류로 이동한다 (누적이 남거나 늘지 않는다)
+    f2p = run_updates_tmp([('2026-08-02_10-00', 'FAIL', 'false'),
+                           ('2026-08-02_10-00', 'PASS', 'true')])
+    check('동일 ID FAIL,false → PASS,true : 원본 카운트 이동',
+          (month(f2p)['PASS'], month(f2p)['FAIL'], month(f2p)['WARN']), (1, 0, 0))
+    check('동일 ID FAIL,false → PASS,true : 서비스 벡터 이동 (장애 회수 · 가용 가산)',
+          vec(f2p), (1, 0, 0))
+    check('동일 ID FAIL,false → PASS,true : 벡터합 = 실행 1건', sum(vec(f2p)), 1)
+
+    w2w = run_updates_tmp([('2026-08-02_10-00', 'WARN', ''),
+                           ('2026-08-02_10-00', 'WARN', 'true')])
+    check('동일 ID WARN,None → WARN,true : 원본 WARN 은 1건 유지',
+          (month(w2w)['WARN'], month(w2w)['PASS']), (1, 0))
+    check('동일 ID WARN,None → WARN,true : 확인 불가에서 가용으로 이동', vec(w2w), (1, 0, 0))
+    check('동일 ID WARN,None → WARN,true : coverage 기록됨',
+          w2w['coverage.json'], {'2026-08-02_10-00': True})
+
+    # 완주 정보가 사라지는 방향(true → None)도 대칭으로 처리된다
+    w2n = run_updates_tmp([('2026-08-02_10-00', 'WARN', 'true'),
+                           ('2026-08-02_10-00', 'WARN', '')])
+    check('동일 ID WARN,true → WARN,None : 가용에서 확인 불가로 되돌림', vec(w2n), (0, 0, 1))
+    check('동일 ID WARN,true → WARN,None : coverage 기록 제거', w2n['coverage.json'], {})
+
+    # 3) 기존 8월 데이터(PASS 0 / WARN 22 / FAIL 1)에 새 완주 WARN 1건이 들어와도 과거가 사라지지 않는다
+    seed_month = {'2026-08': {'PASS': 0, 'WARN': 22, 'FAIL': 1,
+                              'avail': 19, 'outage': 1, 'indet': 3}}
+    grown = run_updates_tmp([('2026-08-02_23-59', 'WARN', 'true')],
+                            seed_monthly=_json.dumps(seed_month))
+    check('기존 8월 원본 카운트 보존 + 새 WARN 1건 가산',
+          (month(grown)['PASS'], month(grown)['WARN'], month(grown)['FAIL']), (0, 23, 1))
+    check('기존 서비스 벡터 보존 + 새 완주 WARN 은 가용으로 가산', vec(grown), (20, 1, 3))
+    check('벡터합 = 기존 23건 + 신규 1건', sum(vec(grown)), 24)
 
     # 3) statuses.json 과 coverage.json 의 키가 같은 윈도우로 정리된다
     rows = [(f'2026-08-02_{h:02d}-00', 'PASS', 'true') for h in range(4)]
@@ -252,6 +332,32 @@ try:
     dirty = run_updates_tmp([('2026-08-02_11-00', 'PASS', 'true')],
                             seed_coverage='{"2026-08-02_10-00": "true"}')
     check('불리언이 아닌 완주 값은 제거', dirty['coverage.json'], {'2026-08-02_11-00': True})
+
+    # 7) 백필 후 서비스 버킷 합계가 실제 실행 수와 일치 (불변식이 갱신 뒤에도 유지되는지)
+    seq = [(f'2026-08-02_{h:02d}-00', st, cv) for h, (st, cv) in enumerate(
+        [('PASS', 'true'), ('WARN', 'true'), ('WARN', 'false'), ('FAIL', 'true'),
+         ('UNKNOWN', ''), ('PASS', 'true')])]
+    grown_seq = run_updates_tmp(seq)
+    check('연속 갱신 후에도 벡터합 = 실행 수', sum(vec(grown_seq)), len(seq))
+    check('연속 갱신 후 불변식 검사 통과',
+          vector_invariant_errors({'2026-08': month(grown_seq)}, {'2026-08': len(seq)}), [])
+    check('분류 내역 (가용 3 · 장애 1 · 확인 불가 2)', vec(grown_seq), (3, 1, 2))
+
+    # 8) 부분 마이그레이션 파일을 정상 데이터로 사용하지 않는다 (읽기 측 최종 방어)
+    partial_month = {'2026-07': {'PASS': 368, 'WARN': 30, 'FAIL': 6},                    # 벡터 없음
+                     '2026-08': {'PASS': 0, 'WARN': 22, 'FAIL': 1,
+                                 'avail': 19, 'outage': 1, 'indet': 3}}                  # 벡터 있음
+    no_meta = {AVAILABLE: 0, OUTAGE: 1, INDETERMINATE: 22}       # 보수적 환산 (8월)
+    check('완료 표시 없는 부분 마이그레이션 — 벡터가 있는 월도 보수적 환산으로 통일',
+          month_buckets(partial_month['2026-08'], migrated=is_migrated({})), no_meta)
+    check('완료 표시 없는 부분 마이그레이션 — 벡터 없는 월도 같은 규칙',
+          month_buckets(partial_month['2026-07'], migrated=is_migrated({})),
+          {AVAILABLE: 368, OUTAGE: 6, INDETERMINATE: 30})
+    check('부분 마이그레이션에서 두 월이 같은 규칙으로 계산된다 (섞이지 않음)',
+          [availability(month_buckets(partial_month[m], migrated=is_migrated({}))) for m in ('2026-07', '2026-08')],
+          [98.4, 0.0])
+    check('완료 표시가 붙으면 비로소 벡터 사용 (8월 95%)',
+          availability(month_buckets(partial_month['2026-08'], migrated=is_migrated(DONE))), 95.0)
 finally:
     for _p, _c in _BACKUP.items():
         open(_p, 'w').write(_c)

@@ -83,6 +83,8 @@ jobs:
           # 런별 점검 완주 여부 — 대시보드의 서비스 가용률·완주율·열린 품질 경고가 이걸 쓴다.
           # 없으면 WARN 이 전부 '확인 불가'로 잡힌다(완주 여부를 모르면 가용을 주장하지 않는다).
           git show origin/gh-pages:coverage.json > /tmp/coverage.json 2>/dev/null || echo '{}' > /tmp/coverage.json
+          # 집계 스키마 상태 — 백필 완료 표시가 없으면 대시보드가 월별 지표를 보수적 환산으로 폴백한다.
+          git show origin/gh-pages:stats-meta.json > /tmp/stats-meta.json 2>/dev/null || echo '{}' > /tmp/stats-meta.json
 
           CURRENT_STATUS=$(python3 -c "import json; d=json.load(open('report-status.json')); print(d.get('status','UNKNOWN'))" 2>/dev/null || echo "UNKNOWN")
           echo "HEALTH_STATUS=$CURRENT_STATUS" >> $GITHUB_ENV
@@ -115,6 +117,7 @@ jobs:
 
           cp /tmp/statuses.json reports/statuses.json
           cp /tmp/coverage.json reports/coverage.json 2>/dev/null || true
+          cp /tmp/stats-meta.json reports/stats-meta.json 2>/dev/null || true
           cp /tmp/perf-history.json reports/perf-history.json
           cp /tmp/monthly-stats.json reports/monthly-stats.json
           cp /tmp/daily-stats.json reports/daily-stats.json
@@ -124,7 +127,7 @@ jobs:
           # 보존되는 이번 런 폴더에 스냅샷을 남겨 최근 120일치 복구 지점을 확보한다(폴더가 prune되면 함께 정리됨).
           cp /tmp/monthly-stats.json /tmp/daily-stats.json reports/$DATETIME/
 
-          python3 scripts/generate_index.py /tmp/all_runs.txt "$DATETIME" /tmp/statuses.json /tmp/perf-history.json /tmp/monthly-stats.json /tmp/daily-stats.json /tmp/failures-history.json reports/index.html /tmp/coverage.json
+          python3 scripts/generate_index.py /tmp/all_runs.txt "$DATETIME" /tmp/statuses.json /tmp/perf-history.json /tmp/monthly-stats.json /tmp/daily-stats.json /tmp/failures-history.json reports/index.html /tmp/coverage.json /tmp/stats-meta.json
 
       - name: 대용량 파일 제거 (GitHub 100MB 제한 대응)
         run: find reports -name "*.zip" -size +50M -delete
