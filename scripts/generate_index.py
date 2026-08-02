@@ -216,7 +216,7 @@ overview_html = f'''
 # 런 단위로 세면 결함 하나가 30분마다 새 경고로 잡힌다(실측: 'WARN 22건' = OG 403 하나가 22회).
 # 지문 단위로 묶고 최초·최근 감지와 연속 검출 횟수를 함께 보여 조치 근거로 쓰게 한다.
 def _warning_display(fingerprint):
-    """내부 지문을 사용자에게 노출할 파일/경로와 오류 유형으로 나눈다."""
+    """내부 지문을 사용자에게 노출할 파일/경로·오류 유형·미리보기 URL로 나눈다."""
     resource, kind = (fingerprint.rsplit('|', 1) + [''])[:2] if '|' in fingerprint else (fingerprint, '')
     clean = resource.split('?', 1)[0].rstrip('/')
     leaf = clean.rsplit('/', 1)[-1] if '/' in clean else clean
@@ -229,7 +229,14 @@ def _warning_display(fingerprint):
         'NETWORK': '네트워크 연결 실패',
         'CONTENT': '콘텐츠 확인 실패',
     }.get(kind, kind.replace('_', ' ').strip() or '점검 경고')
-    return title or fingerprint, clean or fingerprint, kind_label
+    # 이미지 경고만 사용자가 클릭했을 때 원본을 불러온다. 평소에는 추가 요청이 없다.
+    preview_url = None
+    if re.search(r'\.(?:avif|gif|jpe?g|png|webp)$', leaf, re.I):
+        if re.match(r'^https?://', clean, re.I):
+            preview_url = clean
+        elif clean and not clean.startswith(('/', '.')):
+            preview_url = f'https://{clean}'
+    return title or fingerprint, clean or fingerprint, kind_label, preview_url
 
 def _display_run_time(run):
     try:
@@ -239,20 +246,50 @@ def _display_run_time(run):
 
 if open_warnings:
     rows = ''
-    for w in open_warnings:
+    for issue_idx, w in enumerate(open_warnings):
         miss = (f'<span class="qw-miss">최근 {w["missed"]}회 미검출</span>' if w['missed'] else '')
-        issue_title, issue_resource, issue_kind = _warning_display(w['fingerprint'])
+        issue_title, issue_resource, issue_kind, preview_url = _warning_display(w['fingerprint'])
+        if preview_url:
+            preview_id = f'issue-preview-{issue_idx}'
+            title_html = f'''
+            <button type="button" class="issue-title issue-title-btn"
+                    data-preview-url="{escape(preview_url, quote=True)}"
+                    aria-expanded="false" aria-controls="{preview_id}"
+                    onclick="toggleIssuePreview('{preview_id}', this)">
+              <span>{escape(issue_title)}</span><span class="issue-preview-hint">이미지 보기</span>
+            </button>'''
+            preview_html = f'''
+          <div id="{preview_id}" class="issue-preview hidden" data-loaded="false">
+            <div class="issue-preview-head">
+              <strong>이미지 미리보기</strong>
+              <a href="{escape(preview_url, quote=True)}" target="_blank" rel="noopener noreferrer">원본 응답 열기 ↗</a>
+            </div>
+            <div class="issue-preview-stage">
+              <span class="issue-preview-loading">이미지를 불러오는 중입니다.</span>
+              <img class="issue-preview-img hidden" alt="{escape(issue_title, quote=True)} 미리보기" decoding="async">
+              <div class="issue-preview-error hidden">
+                <strong>현재 이미지를 불러올 수 없습니다.</strong>
+                <span>{escape(issue_kind)}이 계속되고 있거나 브라우저가 해당 응답을 이미지로 표시할 수 없습니다.</span>
+              </div>
+            </div>
+          </div>'''
+        else:
+            title_html = f'<strong class="issue-title">{escape(issue_title)}</strong>'
+            preview_html = ''
         rows += f'''
-        <div class="issue-row">
-          <div class="issue-main">
-            <strong class="issue-title">{escape(issue_title)}</strong>
-            <span class="issue-meta">{escape(issue_resource)} · {escape(issue_kind)}</span>
+        <div class="issue-item">
+          <div class="issue-row">
+            <div class="issue-main">
+              {title_html}
+              <span class="issue-meta">{escape(issue_resource)} · {escape(issue_kind)}</span>
+            </div>
+            <div class="issue-count"><span>{w['detected']}회 확인</span>{miss}</div>
+            <div class="issue-dates">
+              <span><small>처음</small>{escape(_display_run_time(w['first']))}</span>
+              <span><small>최근</small>{escape(_display_run_time(w['last']))}</span>
+            </div>
           </div>
-          <div class="issue-count"><span>{w['detected']}회 확인</span>{miss}</div>
-          <div class="issue-dates">
-            <span><small>처음</small>{escape(_display_run_time(w['first']))}</span>
-            <span><small>최근</small>{escape(_display_run_time(w['last']))}</span>
-          </div>
+          {preview_html}
         </div>'''
     quality_html = f'''
     <div class="card quality-card">
@@ -819,10 +856,20 @@ css = """
                    border: 1px solid #5f450d; font-size: .72rem; font-weight: 700; white-space: nowrap; }
   .quality-count--ok { background: #0f2d1a; color: #56d364; border-color: #1d4b2a; }
   .issue-list { margin-top: 14px; border-top: 1px solid #21262d; }
+  .issue-item { border-bottom: 1px solid #21262d; }
   .issue-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center;
-               gap: 18px; padding: 13px 2px; border-bottom: 1px solid #21262d; }
+               gap: 18px; padding: 13px 2px; }
   .issue-main { min-width: 0; }
   .issue-title { display: block; color: #e6edf3; font-size: .8rem; margin-bottom: 4px; }
+  .issue-title-btn { width: fit-content; max-width: 100%; padding: 0; border: 0; background: none;
+                     font: inherit; font-weight: 700; text-align: left; cursor: pointer; }
+  .issue-title-btn > span:first-child { text-decoration: underline; text-decoration-color: #30363d;
+                                        text-underline-offset: 3px; }
+  .issue-title-btn:hover > span:first-child { color: #58a6ff; text-decoration-color: #58a6ff; }
+  .issue-title-btn:focus-visible { outline: 2px solid #58a6ff; outline-offset: 4px; border-radius: 2px; }
+  .issue-preview-hint { display: inline-flex; margin-left: 8px; padding: 2px 6px; border: 1px solid #30363d;
+                        border-radius: 999px; color: #8b949e; font-size: .59rem; font-weight: 650;
+                        line-height: 1.2; vertical-align: 1px; text-decoration: none; }
   .issue-meta { display: block; color: #6e7681; font-size: .68rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .issue-count { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; color: #d29922;
@@ -831,6 +878,21 @@ css = """
                  font-size: .67rem; font-variant-numeric: tabular-nums; }
   .issue-dates span { display: flex; gap: 7px; justify-content: space-between; }
   .issue-dates small { color: #484f58; font-size: .64rem; }
+  .issue-preview { margin: 0 2px 14px; overflow: hidden; border: 1px solid #30363d;
+                   border-radius: 9px; background: #0d1117; }
+  .issue-preview-head { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+                        padding: 9px 11px; border-bottom: 1px solid #21262d; font-size: .69rem; }
+  .issue-preview-head strong { color: #c9d1d9; font-weight: 650; }
+  .issue-preview-head a { color: #58a6ff; text-decoration: none; white-space: nowrap; }
+  .issue-preview-head a:hover { text-decoration: underline; }
+  .issue-preview-stage { display: flex; min-height: 148px; align-items: center; justify-content: center;
+                         padding: 14px; background: #090c10; }
+  .issue-preview-loading { color: #6e7681; font-size: .72rem; }
+  .issue-preview-img { display: block; max-width: 100%; max-height: 420px; border-radius: 6px;
+                       object-fit: contain; background: #fff; }
+  .issue-preview-error { display: flex; max-width: 420px; flex-direction: column; align-items: center;
+                         gap: 6px; color: #8b949e; font-size: .71rem; line-height: 1.5; text-align: center; }
+  .issue-preview-error strong { color: #f0b04b; font-size: .78rem; }
   .qw-miss { font-size: .62rem; color: #6e7681; font-weight: 500; }
   .quality-foot { color: #484f58; font-size: .66rem; line-height: 1.45; padding-top: 10px; }
   .qw-empty { color: #6e7681; font-size: .78rem; padding: 20px 2px 8px; }
@@ -1185,6 +1247,38 @@ function toggleDetail(eid) {{
 }}
 
 // ── Status filter tabs ────────────────────────────────────────────────
+function toggleIssuePreview(id, button) {{
+  var panel = document.getElementById(id);
+  if (!panel) return;
+
+  var willOpen = panel.classList.contains('hidden');
+  panel.classList.toggle('hidden', !willOpen);
+  button.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+  var hint = button.querySelector('.issue-preview-hint');
+  if (hint) hint.textContent = willOpen ? '이미지 닫기' : '이미지 보기';
+
+  if (!willOpen || panel.dataset.loaded === 'true') return;
+  panel.dataset.loaded = 'true';
+
+  var img = panel.querySelector('.issue-preview-img');
+  var loading = panel.querySelector('.issue-preview-loading');
+  var error = panel.querySelector('.issue-preview-error');
+  var url = button.dataset.previewUrl;
+  if (!img || !url) return;
+
+  img.onload = function() {{
+    if (loading) loading.classList.add('hidden');
+    if (error) error.classList.add('hidden');
+    img.classList.remove('hidden');
+  }};
+  img.onerror = function() {{
+    if (loading) loading.classList.add('hidden');
+    img.classList.add('hidden');
+    if (error) error.classList.remove('hidden');
+  }};
+  img.src = url;
+}}
+
 function filterRuns(status, btn) {{
   document.querySelectorAll('.tab-btn').forEach(function(b) {{ b.classList.remove('active'); }});
   btn.classList.add('active');
