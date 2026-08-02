@@ -11,6 +11,7 @@ from dashboard_metrics import (
     classify_run, classify_counts, availability, completion_rate, no_warning_rate,
     open_quality_warnings, current_state, month_buckets, is_migrated,
     vector_of, merge_bucket, vector_invariant_errors, vector_shape_errors, vector_replaced,
+    occurrence_states, is_recovery_record, OCCURRENCE_NEW, OCCURRENCE_PERSISTING,
 )
 
 failures = []
@@ -126,6 +127,91 @@ opened, resolved = open_quality_warnings(
     {r: True for r in ['r1', 'r2', 'r3']})
 check('결함별 독립 관리 (OG 유지 · 버튼 해결)',
       ([o['fingerprint'] for o in opened], [r['fingerprint'] for r in resolved]), ([OG], [BTN]))
+
+print("\n== 결함 관측 상태 (신규 · 지속) ==")
+# 같은 OG 403 이 매 실행 반복될 때 '새로 생긴 문제'인지 구분하기 위한 배지의 판정 규칙.
+# 열린 품질 경고와 같은 규칙(완주 실행만 갱신 · 2회 연속 미검출이면 닫힘)을 써야 한다.
+
+
+def _state(states, run, fp):
+    return states.get(run, {}).get(fp, {}).get('state')
+
+
+def _detected(states, run, fp):
+    return states.get(run, {}).get(fp, {}).get('detected')
+
+
+runs3 = ['r1', 'r2', 'r3']
+st = occurrence_states(runs3, {'r1': {OG}, 'r2': {OG}, 'r3': {OG}}, {r: True for r in runs3})
+check('최초 등장은 신규', _state(st, 'r1', OG), OCCURRENCE_NEW)
+check('다음 완주 실행에서 재등장하면 지속', _state(st, 'r2', OG), OCCURRENCE_PERSISTING)
+check('계속 보이면 계속 지속', _state(st, 'r3', OG), OCCURRENCE_PERSISTING)
+check('누적 검출 횟수 증가', [_detected(st, r, OG) for r in runs3], [1, 2, 3])
+
+# 다른 지문은 서로 영향을 주지 않는다 — 각각 자기 시점에 신규다.
+st = occurrence_states(['r1', 'r2'], {'r1': {OG}, 'r2': {OG, BTN}}, {'r1': True, 'r2': True})
+check('다른 지문은 각각 신규', (_state(st, 'r2', OG), _state(st, 'r2', BTN)),
+      (OCCURRENCE_PERSISTING, OCCURRENCE_NEW))
+
+# 미완주 실행은 상태를 갱신하지 않는다 — 거기서만 본 지문이 다음 실행을 '지속'으로 만들면 안 된다.
+st = occurrence_states(['r1', 'r2'], {'r1': {OG}, 'r2': {OG}}, {'r1': False, 'r2': True})
+check('미완주 실행에서만 등장한 지문은 지속 근거가 아니다', _state(st, 'r2', OG), OCCURRENCE_NEW)
+check('미완주 실행 자신의 배지는 신규로 표시', _state(st, 'r1', OG), OCCURRENCE_NEW)
+check('미완주 실행에서는 누적 검출 횟수가 늘지 않는다', _detected(st, 'r1', OG), 0)
+
+# 완주 실행에서 열린 뒤 미완주 실행이 끼어도 지속 판정은 유지된다(미검출로 세지 않는다).
+st = occurrence_states(['r1', 'r2', 'r3'], {'r1': {OG}, 'r2': set(), 'r3': {OG}},
+                       {'r1': True, 'r2': False, 'r3': True})
+check('중간 미완주 실행은 해결 근거가 아니다 (지속 유지)', _state(st, 'r3', OG), OCCURRENCE_PERSISTING)
+
+# 완주 실행 2회 연속 미검출이면 닫히고, 다시 나오면 재발이므로 신규다.
+st = occurrence_states(['r1', 'r2', 'r3', 'r4'],
+                       {'r1': {OG}, 'r2': set(), 'r3': set(), 'r4': {OG}},
+                       {r: True for r in ['r1', 'r2', 'r3', 'r4']})
+check('완주 2회 연속 미검출 후 재발은 신규 (해결 규칙과 동일)', _state(st, 'r4', OG), OCCURRENCE_NEW)
+st = occurrence_states(['r1', 'r2', 'r3'], {'r1': {OG}, 'r2': set(), 'r3': {OG}},
+                       {r: True for r in ['r1', 'r2', 'r3']})
+check('완주 1회 미검출로는 닫히지 않는다 (지속 유지)', _state(st, 'r3', OG), OCCURRENCE_PERSISTING)
+# detected 는 '연속'이 아니라 '누적'이다 — 1회 미검출로는 결함이 닫히지 않으므로
+# 그 사이를 건너뛴 검출도 같은 결함의 누적으로 이어서 센다.
+check('검출 → 완주 미검출 1회 → 재검출 = 누적 2회 (연속이 아님)', _detected(st, 'r3', OG), 2)
+check('중간 미검출 실행에는 상태가 생기지 않는다', st['r2'], {})
+# 닫힌 뒤 재발하면 누적도 처음부터 다시 센다.
+st = occurrence_states(['r1', 'r2', 'r3', 'r4'],
+                       {'r1': {OG}, 'r2': set(), 'r3': set(), 'r4': {OG}},
+                       {r: True for r in ['r1', 'r2', 'r3', 'r4']})
+check('해결 후 재발하면 누적 검출은 1부터 다시 센다', _detected(st, 'r4', OG), 1)
+
+check('지문이 없는 기록은 상태를 만들지 않는다',
+      occurrence_states(['r1'], {'r1': {None, ''}}, {'r1': True}), {'r1': {}})
+check('기록이 없는 실행도 빈 상태로 존재', occurrence_states(['r1'], {}, {'r1': True}), {'r1': {}})
+
+print("\n== 재시도 회복 식별 ==")
+# INFO 이면서 '회복'이 적힌 기록만 재시도 회복이다. 결함 해결(완주 2회 미검출)과는 다른 개념.
+check('INFO + 회복 문구 → 재시도 회복',
+      is_recovery_record({'severity': 'INFO', 'symptom': '간헐 실패 후 회복 (최초 HTTP 502 → 재확인 200)'}), True)
+check('INFO + 재측정 회복 문구 → 재시도 회복',
+      is_recovery_record({'severity': 'INFO', 'symptom': '본측정 간헐 실패 후 재측정 회복'}), True)
+check('INFO 이지만 회복이 아니면 아님',
+      is_recovery_record({'severity': 'INFO', 'symptom': '외부 링크 응답 이상 (HTTP 404)'}), False)
+check('WARN 은 회복 문구가 있어도 아님',
+      is_recovery_record({'severity': 'WARN', 'symptom': '회복'}), False)
+check('구버전 severity 없음은 아님 (장애 성격 유지)',
+      is_recovery_record({'symptom': '간헐 실패 후 회복'}), False)
+check('dict 가 아니어도 죽지 않음', is_recovery_record(None), False)
+
+# 구버전 기록(severity 없음)은 FAIL 성격이므로 지문 집계에 그대로 들어가야 한다.
+st = occurrence_states(['r1', 'r2'], {'r1': {OG}, 'r2': {OG}}, {'r1': True, 'r2': True})
+check('severity 없는 구버전 지문도 신규→지속으로 이어진다',
+      (_state(st, 'r1', OG), _state(st, 'r2', OG)), (OCCURRENCE_NEW, OCCURRENCE_PERSISTING))
+
+# 배지를 추가해도 열린 품질 경고 규칙은 그대로여야 한다(같은 입력·같은 결과).
+opened_after, resolved_after = open_quality_warnings(
+    ['r1', 'r2', 'r3', 'r4'],
+    {'r1': {BTN}, 'r2': set(), 'r3': set(), 'r4': set()},
+    {r: True for r in ['r1', 'r2', 'r3', 'r4']})
+check('열린 품질 경고의 2회 연속 미검출 해결 규칙 불변',
+      ([o['fingerprint'] for o in opened_after], [r['fingerprint'] for r in resolved_after]), ([], [BTN]))
 
 print("\n== 현재 상태 표시 ==")
 check('FAIL → 서비스 장애', current_state('FAIL', True, 0), ('서비스 장애', 'fail'))

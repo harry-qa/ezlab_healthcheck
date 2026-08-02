@@ -10,8 +10,10 @@ from collections import defaultdict
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dashboard_metrics import (
     AVAILABLE, OUTAGE, INDETERMINATE,
+    OCCURRENCE_NEW, OCCURRENCE_PERSISTING,
     classify_counts, availability, completion_rate, no_warning_rate,
-    open_quality_warnings, current_state, month_buckets, is_migrated,
+    open_quality_warnings, occurrence_states, is_recovery_record,
+    current_state, month_buckets, is_migrated,
 )
 
 # ── CLI args ──────────────────────────────────────────────────────────
@@ -62,7 +64,14 @@ stats_migrated   = is_migrated(stats_meta)
 LANGS       = ['ko', 'en', 'jp', 'tw']
 LANG_LABELS = {'ko': '한국어', 'en': '영어', 'jp': '일본어', 'tw': '중국어'}
 BASE_URL    = 'https://ezlab.im'
-THRESHOLD   = 500  # ms danger threshold (TTFB 첫 응답 기준 · 본문 다운로드 제외)
+# TTFB 참고선(ms). '판정 임계치'가 아니라 화면 표시 기준선이다 — 이 값을 넘어도
+# STEP1 서버 생존은 2xx·3xx면 PASS고 WARN·FAIL·가용률에 아무 영향이 없다.
+# CI 러너↔서버 거리와 러너 부하가 그대로 섞여 들어오는 값이라 판정 근거로 쓰지 않는다.
+THRESHOLD   = 500
+# 참고선 초과를 장애와 같은 빨강으로 칠하면 실제 FAIL 과 구분이 안 된다 → 주황 계열로 분리.
+# 빨강(#f85149)은 FAIL·5xx 등 실제 장애 표현에만 남긴다.
+OVER_COLOR  = '#d29922'
+TTFB_NOTE   = 'CI 러너 네트워크 영향을 포함한 참고 지표이며 WARN·FAIL 판정에는 반영되지 않습니다.'
 
 # ── Overview stats ────────────────────────────────────────────────────
 # 지표를 넷으로 분리한다(산식·근거는 dashboard_metrics.py 참고).
@@ -87,16 +96,31 @@ comp_rate, comp_done, comp_known = completion_rate([_cov(e) for e in entries])
 nowarn_rate, nowarn_scored = no_warning_rate([statuses.get(e, 'UNKNOWN') for e in entries])
 
 # 열린 품질 경고 — 런 단위가 아니라 결함(지문) 단위. 완주 실행만으로 상태를 관리한다.
-def _warn_fps(run):
+def _records(run):
+    """런의 장애·경고 기록 목록. 구버전은 {'failures': [...]} 형태로 저장돼 있다."""
     items = failures_history.get(run, [])
     if not isinstance(items, list):
         items = items.get('failures', [])
-    return {i.get('fingerprint') for i in items
+    return items if isinstance(items, list) else []
+
+def _warn_fps(run):
+    return {i.get('fingerprint') for i in _records(run)
             if i.get('severity') == 'WARN' and i.get('fingerprint')}
 
+# 신규·지속 배지용 지문 — INFO(참고·재시도 회복)는 결함이 아니므로 제외한다.
+# 구버전 기록은 severity 가 없고 당시엔 FAIL 만 저장했으므로 여기 포함된다.
+def _scored_fps(run):
+    return {i.get('fingerprint') for i in _records(run)
+            if i.get('severity') != 'INFO' and i.get('fingerprint')}
+
 _chrono = sorted(entries)  # 과거 → 현재
+_coverage_by_run = {r: _cov(r) for r in _chrono}
 open_warnings, resolved_warnings = open_quality_warnings(
-    _chrono, {r: _warn_fps(r) for r in _chrono}, {r: _cov(r) for r in _chrono})
+    _chrono, {r: _warn_fps(r) for r in _chrono}, _coverage_by_run)
+
+# 실행별 지문 관측 상태(신규/지속). 열린 품질 경고와 같은 규칙을 쓴다 — dashboard_metrics 참고.
+occurrence_by_run = occurrence_states(
+    _chrono, {r: _scored_fps(r) for r in _chrono}, _coverage_by_run)
 
 _status_label, status_key = current_state(cur_status, cur_cov, len(open_warnings))
 
@@ -404,7 +428,7 @@ def make_lang_sparklines():
         ]
         ty = cy(THRESHOLD)
         if PT <= ty <= PT + CH:
-            body.append(f'<line x1="0" y1="{ty:.1f}" x2="{W}" y2="{ty:.1f}" stroke="#e5534b" stroke-width="1" stroke-dasharray="3,3" opacity="0.45"/>')
+            body.append(f'<line x1="0" y1="{ty:.1f}" x2="{W}" y2="{ty:.1f}" stroke="{OVER_COLOR}" stroke-width="1" stroke-dasharray="3,3" opacity="0.5"/>')
         if line:
             area = line + f' L{pts[-1][0]:.1f},{H-PB:.1f} L{pts[0][0]:.1f},{H-PB:.1f} Z'
             body.append(f'<path d="{area}" fill="url(#{gid})"/>')
@@ -417,7 +441,7 @@ def make_lang_sparklines():
             f'<svg viewBox="0 0 {W} {H}" width="100%" height="{H}" '
             f'preserveAspectRatio="none" style="display:block">{"".join(body)}</svg>'
         )
-        cur_cls = 'spark-cur--danger' if latest >= THRESHOLD else ''
+        cur_cls = 'spark-cur--over' if latest >= THRESHOLD else ''
         cards += (
             f'<div class="spark-card">'
             f'<div class="spark-head">'
@@ -529,6 +553,12 @@ for entry in entries:
 
 sorted_months_list = sorted(by_month.keys(), reverse=True)
 
+# 최신 실행이 WARN·FAIL 이면 그 실행의 일자와 상세까지 처음부터 펼친다 — 이상이 있는데도
+# 월→일→실행 3단계를 손으로 열어야 내용이 보이는 게 실사용에서 가장 불편했다.
+# PASS 면 지금처럼 접힌 상태를 유지한다. 자동 펼침은 서버에서 초기 class 만 다르게 주는 방식이라
+# 아코디언·필터 로직은 그대로다(필터를 누르면 기존대로 기본 상태로 돌아간다).
+auto_open_run = current_run if cur_status in ('WARN', 'FAIL') else None
+
 rows_html = ''
 for midx, month in enumerate(sorted_months_list):
     days = by_month[month]
@@ -558,11 +588,12 @@ for midx, month in enumerate(sorted_months_list):
         else:                                    day_st, day_css = '?',    'badge-unknown'
 
         hidden_cls = '' if month_open else ' hidden'
+        day_open   = month_open and auto_open_run is not None and any(e == auto_open_run for e, _ in runs)
         rows_html += (
             f'<tr class="day-header{hidden_cls}" data-parent="{gid}" data-gid="{did}"'
             f' onclick="toggleGroup(\'{did}\')">'
             f'<td colspan="3" style="padding-left:28px">'
-            f'<span class="arrow" id="arrow-{did}">▶</span>'
+            f'<span class="arrow" id="arrow-{did}">{"▼" if day_open else "▶"}</span>'
             f' {date_short} <span class="grp-count">{len(runs)}건</span></td>'
             f'<td><span class="status-badge {day_css}">{day_st}</span></td></tr>\n'
         )
@@ -579,9 +610,11 @@ for midx, month in enumerate(sorted_months_list):
             for lang in LANGS:
                 ms = perf.get(lang, 0)
                 if ms > 0:
-                    slow_cls = ' slow' if ms >= THRESHOLD else ''
+                    over = ms >= THRESHOLD
+                    slow_cls = ' slow' if over else ''
+                    chip_title = f' title="참고선 {THRESHOLD}ms 초과 · {TTFB_NOTE}"' if over else ''
                     perf_cells += (
-                        f'<span class="perf-chip{slow_cls}">'
+                        f'<span class="perf-chip{slow_cls}"{chip_title}>'
                         f'<span class="pc-dot" style="background:{LANG_COLORS[lang]}"></span>'
                         f'<span class="pc-lang">{lang.upper()}</span>'
                         f'<span class="pc-ms">{ms}</span>'
@@ -596,9 +629,10 @@ for midx, month in enumerate(sorted_months_list):
                 ms = perf.get(lang, 0)
                 if ms <= 0:
                     continue
-                perf_state = '위험 구간' if ms >= THRESHOLD else '정상 범위'
-                perf_state_cls = ' dt-state-danger' if ms >= THRESHOLD else ''
-                perf_value_cls = ' dt-value-danger' if ms >= THRESHOLD else ''
+                # '위험 구간'은 WARN·FAIL 판정이 난 것처럼 읽힌다 — 실제로는 표시 기준선일 뿐이다.
+                perf_state = '참고선 초과' if ms >= THRESHOLD else '참고선 이내'
+                perf_state_cls = ' dt-state-over' if ms >= THRESHOLD else ''
+                perf_value_cls = ' dt-value-over' if ms >= THRESHOLD else ''
                 perf_cards += (
                     f'<div class="perf-detail-card">'
                     f'<div class="dt-card-head"><span class="lang-dot" style="background:{LANG_COLORS[lang]}"></span>'
@@ -626,8 +660,10 @@ for midx, month in enumerate(sorted_months_list):
 
             perf_section = (
                 f'<div class="dp-section">'
-                f'<div class="dp-title">서버 첫 응답 시간 <span class="dp-sub">TTFB · 3회 중앙값</span></div>'
+                f'<div class="dp-title">서버 첫 응답 시간 '
+                f'<span class="dp-sub">TTFB · 3회 중앙값 · 참고선 {THRESHOLD}ms</span></div>'
                 f'<div class="perf-detail-grid">{perf_cards}</div>'
+                f'<div class="dp-note">{TTFB_NOTE}</div>'
                 f'</div>'
             ) if perf_cards else ''
 
@@ -670,16 +706,58 @@ for midx, month in enumerate(sorted_months_list):
                     is_fail = sev == 'FAIL' or sev is None
                     severity_txt = '참고' if is_info else ('장애' if is_fail else '경고')
                     severity_cls = ' fd-severity-info' if is_info else (' fd-severity-fail' if is_fail else ' fd-severity-warn')
+
+                    # 관측 상태 배지 — 같은 결함이 30분마다 똑같이 뜰 때 '새로 생긴 건지'를 구분한다.
+                    # 판정(등급)과는 다른 축이라 등급 배지 옆에 따로 붙인다.
+                    # 재시도 회복(INFO)은 '그 실행에서 일시 장애가 회복된 것'이고,
+                    # 열린 품질 경고의 '해결'(완주 2회 연속 미검출)과는 다른 개념이다.
+                    occ = occurrence_by_run.get(entry, {}).get(fr.get('fingerprint'))
+                    if is_info and is_recovery_record(fr):
+                        state_html = ('<span class="fd-state fd-state-recovered"'
+                                      ' title="재시도 후 정상 응답으로 회복된 기록 · 런 상태에는 반영되지 않습니다">'
+                                      '재시도 회복</span>')
+                    elif occ and occ['state'] == OCCURRENCE_PERSISTING:
+                        # 누적 검출 횟수다(연속이 아님) — 해결 기준이 완주 2회 연속 미검출이라
+                        # 1회 미검출로는 결함이 닫히지 않고 그 뒤 검출도 이어서 센다.
+                        seen_n = occ.get('detected', 0)
+                        seen_txt = f'지속 {seen_n}회' if seen_n >= 2 else '지속'
+                        state_html = (f'<span class="fd-state fd-state-persist"'
+                                      f' title="이전 완주 실행에서도 관측된 결함 · 지금 열려 있는 동안'
+                                      f' 완주 실행 기준 누적 검출 {seen_n}회">'
+                                      f'{seen_txt}</span>')
+                    elif occ and occ['state'] == OCCURRENCE_NEW:
+                        state_html = ('<span class="fd-state fd-state-new"'
+                                      ' title="이 실행에서 처음 관측된 지문">신규</span>')
+                    else:
+                        # 지문이 없는 구버전 기록·일반 INFO 는 근거가 없으므로 배지를 만들지 않는다.
+                        state_html = ''
+
+                    is_http  = str(fr.get('url', '')).startswith(('http://', 'https://'))
                     url_html = (
                         f'<a class="fd-url" href="{f_url}" target="_blank" rel="noopener">{f_url}</a>'
-                        if str(fr.get('url', '')).startswith(('http://', 'https://'))
-                        else f'<span class="fd-url">{f_url}</span>'
+                        if is_http else f'<span class="fd-url">{f_url}</span>'
                     )
+                    # 증거는 Playwright 리포트 안 attachment 로만 존재한다(배포된 data/<sha1> 파일명을
+                    # 기록에 남기지 않으므로 개별 파일 직링크를 만들 수 없다) → 리포트로 보낸다.
+                    # 그래서 문구도 '증거 열기'가 아니라 '리포트 열기'다 — 해당 스크린샷으로 바로
+                    # 이동하는 것처럼 적으면 클릭한 사용자가 리포트에서 다시 찾아야 해서 속은 셈이 된다.
+                    # evidencePath 가 없는 기록에는 버튼을 만들지 않는다(404 링크 방지).
+                    actions = ''
+                    if is_http:
+                        actions += (f'<a class="fd-act" href="{f_url}" target="_blank" rel="noopener">'
+                                    f'원본 응답 열기 <span>↗</span></a>')
+                    if fr.get('evidencePath'):
+                        actions += (f'<a class="fd-act fd-act-evidence" href="{entry}/" target="_blank" rel="noopener"'
+                                    f' title="이 실행의 Playwright 리포트를 엽니다 · 증거 스크린샷은 리포트 안 첨부 항목에 있습니다">'
+                                    f'상세 Playwright 리포트 열기 <span>↗</span></a>')
+                    actions_html = f'<div class="fd-actions">{actions}</div>' if actions else ''
+
                     f_rows += (
                         f'<article class="fd-item{" fd-item-info" if is_info else ""}">'
                         f'<div class="fd-item-head">'
                         f'<span class="fd-icon">{icon}</span>'
                         f'<span class="fd-severity{severity_cls}">{severity_txt}</span>'
+                        f'{state_html}'
                         f'<span class="fd-step">{f_step}</span>'
                         f'<span class="fd-lang">{f_lang}</span>'
                         f'<span class="fd-response"><b class="fd-status {status_cls}">{status_label}</b>'
@@ -687,6 +765,7 @@ for midx, month in enumerate(sorted_months_list):
                         f'</div>'
                         f'{url_html}'
                         f'<div class="fd-sym">{f_sym}</div>'
+                        f'{actions_html}'
                         f'</article>'
                     )
                 scored_n = len(run_failures) - info_n
@@ -703,16 +782,18 @@ for midx, month in enumerate(sorted_months_list):
                     f'</div>'
                 )
 
+            detail_open = (entry == auto_open_run)
+            row_hidden  = '' if day_open else ' hidden'
             rows_html += (
-                f'<tr class="run-row hidden{new_cls}" data-parent="{did}" data-status="{st}" data-eid="{eid}"'
+                f'<tr class="run-row{row_hidden}{new_cls}" data-parent="{did}" data-status="{st}" data-eid="{eid}"'
                 f' onclick="toggleDetail(\'{eid}\')">'
                 f'<td class="run-time">{new_badge}{date_short} {time_display}</td>'
                 f'<td><span class="status-badge {badge_css}">{st}</span></td>'
                 f'<td class="perf-summary">{perf_cells}</td>'
-                f'<td class="chev-cell"><span class="chev" id="chev-{eid}">›</span></td></tr>\n'
+                f'<td class="chev-cell"><span class="chev{" open" if detail_open else ""}" id="chev-{eid}">›</span></td></tr>\n'
             )
             rows_html += (
-                f'<tr class="run-detail hidden" id="detail-{eid}">'
+                f'<tr class="run-detail{"" if detail_open else " hidden"}" id="detail-{eid}">'
                 f'<td colspan="4">'
                 f'<div class="detail-panel">'
                 f'<div class="detail-head">'
@@ -813,8 +894,9 @@ css = """
   .chart-card { background: #161b22; border: 1px solid #21262d; border-radius: 10px;
                 padding: 18px 20px; margin-bottom: 18px; }
   .chart-header { display: flex; align-items: baseline; gap: 8px; margin-bottom: 12px; }
-  .threshold-note { font-size: .72rem; color: #484f58; margin-left: auto; }
-  .threshold-note span { color: #f85149; font-weight: 600; }
+  /* 참고선은 판정 기준이 아니다 → 장애 빨강이 아니라 주황으로 표시한다 */
+  .threshold-note { font-size: .72rem; color: #484f58; margin-left: auto; cursor: help; }
+  .threshold-note span { color: #d29922; font-weight: 600; }
 
   /* Per-language sparkline cards (small multiples) */
   .lang-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
@@ -826,7 +908,7 @@ css = """
   .spark-cur { margin-left: auto; font-size: 1.05rem; font-weight: 800; color: #f0f6fc;
                line-height: 1; font-variant-numeric: tabular-nums; }
   .spark-cur .unit { font-size: .6rem; font-weight: 600; color: #6e7681; margin-left: 1px; }
-  .spark-cur--danger { color: #ff7b72; }
+  .spark-cur--over { color: #e3b341; }
   .spark-foot { font-size: .64rem; color: #6e7681; margin-top: 8px;
                 font-variant-numeric: tabular-nums; }
 
@@ -965,9 +1047,10 @@ css = """
   .pc-dot  { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
   .pc-lang { font-size: .6rem; font-weight: 700; color: #6e7681; letter-spacing: .03em; }
   .pc-ms   { font-size: .72rem; font-weight: 600; color: #8b949e; font-variant-numeric: tabular-nums; }
-  .perf-chip.slow { background: #2a1414; border-color: #4d2424; }
-  .perf-chip.slow .pc-ms { color: #ff7b72; font-weight: 700; }
-  .perf-chip.slow .pc-lang { color: #b9686a; }
+  /* 참고선 초과 — 판정이 아니라 눈에 띄게만 한다(빨강은 실제 장애 전용) */
+  .perf-chip.slow { background: #2a2210; border-color: #4d3f1c; }
+  .perf-chip.slow .pc-ms { color: #e3b341; font-weight: 700; }
+  .perf-chip.slow .pc-lang { color: #b39a5c; }
 
   /* Detail panel */
   .run-detail td { padding: 0; border-top: none; }
@@ -1000,9 +1083,11 @@ css = """
   .dt-value { margin-top: 9px; color: #e6edf3; font-size: 1.25rem; font-weight: 800;
               font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
   .dt-value span { margin-left: 2px; color: #6e7681; font-size: .67rem; font-weight: 600; }
-  .dt-value-danger { color: #ff7b72; }
+  .dt-value-over { color: #e3b341; }
   .dt-state { margin-top: 2px; color: #3fb950; font-size: .65rem; font-weight: 650; }
-  .dt-state-danger { color: #f85149; }
+  .dt-state-over { color: #d29922; }
+  .dp-note { margin-top: 9px; color: #6e7681; font-size: .68rem; line-height: 1.5; }
+  .chart-note { margin-top: 10px; color: #6e7681; font-size: .68rem; line-height: 1.5; }
 
   /* cURL rows */
   .dp-tools { margin-top: 4px; border: 1px solid #21262d; border-radius: 8px; background: #11161e; }
@@ -1026,7 +1111,7 @@ css = """
   .curl-copy:hover { background: #30363d; color: #e6edf3; }
   .curl-copy.copied { background: #1f3a1f; color: #3fb950; border-color: #2ea043; }
   .curl-ms { font-size: .72rem; color: #484f58; width: 54px; text-align: right; flex-shrink: 0; }
-  .curl-ms.curl-time-slow { color: #f85149; font-weight: 700; }
+  .curl-ms.curl-time-slow { color: #e3b341; font-weight: 700; }
 
   /* Failure detail table */
   .dp-failure { padding-left: 0; }
@@ -1044,6 +1129,21 @@ css = """
   .fd-severity-fail { background: #2d0f0f; color: #ff7b72; }
   .fd-severity-warn { background: #2d2008; color: #e3b341; }
   .fd-severity-info { background: #21262d; color: #8b949e; }
+  /* 관측 상태(신규/지속/재시도 회복) — 등급과 다른 축이라 색을 등급과 겹치지 않게 둔다 */
+  .fd-state { flex: 0 0 auto; padding: 2px 7px; border-radius: 999px; font-size: .61rem;
+              font-weight: 750; letter-spacing: .02em; cursor: help; }
+  .fd-state-new { background: #0d2440; color: #6cb6ff; }
+  .fd-state-persist { background: #21262d; color: #adbac7; }
+  .fd-state-recovered { background: #0f2417; color: #57ab5a; }
+  /* 증거 바로가기 — '원본 응답'과 '헬스체크 증거'를 서로 다른 버튼으로 분리한다 */
+  .fd-actions { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+  .fd-act { display: inline-flex; align-items: center; gap: 5px; padding: 5px 9px; border-radius: 6px;
+            border: 1px solid #30363d; background: #0d1117; color: #adbac7; font-size: .68rem;
+            font-weight: 650; }
+  .fd-act span { color: #6e7681; font-size: .62rem; }
+  .fd-act:hover { background: #21262d; color: #e6edf3; text-decoration: none; }
+  .fd-act-evidence { border-color: #325168; color: #6cb6ff; }
+  .fd-act-evidence:hover { background: #10243a; color: #9ecbff; }
   .fd-info-tag { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 3px;
                  background: #21262d; color: #8b949e; font-size: .62rem; font-weight: 700;
                  vertical-align: middle; white-space: nowrap; }
@@ -1134,6 +1234,8 @@ css = """
     .curl-code { order: 2; flex-basis: calc(100% - 66px); }
     .curl-copy { order: 3; }
     .curl-ms { margin-left: auto; }
+    .fd-actions { gap: 6px; }
+    .fd-act { padding: 5px 8px; font-size: .65rem; }
   }
 """
 
@@ -1214,9 +1316,10 @@ html = f"""<!DOCTYPE html>
   <div class="chart-card">
     <div class="chart-header">
       <span class="section-title">서버 첫 응답(TTFB) 추이<span class="section-sub">언어별 · 최근 24회 · 3회 중앙값</span></span>
-      <span class="threshold-note">위험 임계치 <span>{THRESHOLD}ms</span></span>
+      <span class="threshold-note" title="{TTFB_NOTE}">응답 지연 참고선 <span>{THRESHOLD}ms</span></span>
     </div>
     {sparklines_html}
+    <div class="chart-note">{TTFB_NOTE}</div>
   </div>
 
   {cert_panel_html}
@@ -1461,6 +1564,17 @@ function copyCurl(id, btn) {{
     btn.textContent = '✓ 복사됨';
     btn.classList.add('copied');
     setTimeout(function() {{ btn.textContent = '복사'; btn.classList.remove('copied'); }}, 2000);
+  }});
+}}
+
+// ── 자동 펼침보다 사용자 상태를 우선 ──────────────────────────────────
+// 최신 실행이 WARN·FAIL 이면 서버에서 상세를 펼친 채로 그린다. 다만 URL hash 로 특정 위치를
+// 지목해 들어온 경우엔 그쪽이 사용자의 의도이므로 자동으로 연 상세를 닫는다.
+if (location.hash) {{
+  document.querySelectorAll('.run-detail:not(.hidden)').forEach(function(det) {{
+    det.classList.add('hidden');
+    var chev = document.getElementById('chev-' + det.id.replace('detail-', ''));
+    if (chev) chev.classList.remove('open');
   }});
 }}
 </script>
