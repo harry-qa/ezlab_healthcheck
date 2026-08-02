@@ -243,6 +243,72 @@ def open_quality_warnings(runs_chrono, warn_fingerprints, coverage, resolve_afte
     return ordered, resolved
 
 
+# 결함 카드에 붙는 관측 상태. 판정(FAIL/WARN/INFO)이 아니라 '언제부터 보이는가' 만 답한다.
+OCCURRENCE_NEW        = 'new'          # 이 실행에서 처음 관측된 지문
+OCCURRENCE_PERSISTING = 'persisting'   # 이전 완주 실행에서도 관측됐고 지금도 있는 지문
+
+
+def occurrence_states(runs_chrono, fingerprints_by_run, coverage, resolve_after=2):
+    """실행별로 '이 지문이 이번에 처음인가(신규), 계속 보이던 것인가(지속)' 를 계산한다.
+
+    같은 결함이 30분마다 똑같이 보이면 사용자는 새로 생긴 문제인지 구분할 수 없다.
+    open_quality_warnings 와 '완전히 같은 규칙'을 쓴다 — 규칙이 갈라지면 열린 품질 경고
+    카운트와 카드 배지가 서로 다른 말을 하게 된다.
+      · 상태 갱신은 완주 실행만 한다. 미완주 실행은 검사를 덜 했을 수 있어
+        '안 보였다'가 해결의 근거가 아니고, 거기서만 보인 지문을 '지속'의 근거로도 쓰지 않는다.
+      · 완주 실행에서 resolve_after 회 연속 미검출이면 닫히고, 뒤에 다시 나오면 '신규'(재발)다.
+
+    미완주 실행의 카드도 배지는 붙여야 하므로, 그 실행은 상태를 '읽기만' 하고 갱신하지 않는다.
+
+    인자:
+        fingerprints_by_run : {런: set(지문)} — INFO 를 뺀 FAIL·WARN 지문
+        coverage            : {런: True|False|None}
+    반환: {런: {지문: {'state': OCCURRENCE_*, 'detected': 누적 검출 횟수}}}
+          detected 는 '지금 열려 있는 그 결함'에서 완주 실행 기준 **누적** 검출 횟수다.
+          연속 횟수가 아니다 — 해결 기준이 완주 2회 연속 미검출이라 1회 미검출로는 결함이
+          닫히지 않고, 그 뒤 검출도 같은 결함의 누적으로 이어서 센다.
+          (검출 → 완주 미검출 1회 → 검출 = 누적 2회)
+          미완주 실행에서는 늘지 않는다. 결함이 닫히면 0부터 다시 센다.
+    """
+    open_map = {}
+    states = {}
+    for run in runs_chrono:
+        seen = {fp for fp in (fingerprints_by_run.get(run) or ()) if fp}
+        complete = coverage.get(run) is True
+        current = {}
+        for fp in seen:
+            prev = open_map.get(fp)
+            current[fp] = {
+                'state': OCCURRENCE_PERSISTING if prev else OCCURRENCE_NEW,
+                'detected': (prev['detected'] if prev else 0) + (1 if complete else 0),
+            }
+        states[run] = current
+        if not complete:
+            continue
+        for fp in seen:
+            state = open_map.setdefault(fp, {'detected': 0, 'missed': 0})
+            state['detected'] += 1
+            state['missed'] = 0
+        for fp in list(open_map):
+            if fp in seen:
+                continue
+            open_map[fp]['missed'] += 1
+            if open_map[fp]['missed'] >= resolve_after:
+                open_map.pop(fp)
+    return states
+
+
+def is_recovery_record(record):
+    """재시도 후 정상으로 돌아온 기록인가(= 결함 해결이 아니라 '그 실행에서 회복').
+
+    spec 의 intermittentRecoveries 는 severity INFO 로 남고 증상에 '회복'을 적는다.
+    별도 플래그 필드가 없어 증상 문구로 식별한다 — 판정에는 쓰지 않고 표시 구분에만 쓴다.
+    """
+    if not isinstance(record, dict) or record.get('severity') != 'INFO':
+        return False
+    return '회복' in str(record.get('symptom', ''))
+
+
 def current_state(status, coverage, open_warn_count):
     """현재 상태 표시 — '가용'과 '확인 불가'를 뭉뚱그리지 않는다.
 
