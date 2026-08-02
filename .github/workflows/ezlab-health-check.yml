@@ -52,6 +52,7 @@ jobs:
         run: |
           npx playwright test tests/judgment.spec.ts
           python3 scripts/test_fail_streak.py
+          python3 scripts/test_dashboard_metrics.py
 
       - name: 테스트 실행
         run: npx playwright test tests/ezlab.spec.ts
@@ -79,6 +80,9 @@ jobs:
           git show origin/gh-pages:monthly-stats.json > /tmp/monthly-stats.json 2>/dev/null || echo '{}' > /tmp/monthly-stats.json
           git show origin/gh-pages:daily-stats.json > /tmp/daily-stats.json 2>/dev/null || echo '{}' > /tmp/daily-stats.json
           git show origin/gh-pages:failures-history.json > /tmp/failures-history.json 2>/dev/null || echo '{}' > /tmp/failures-history.json
+          # 런별 점검 완주 여부 — 대시보드의 서비스 가용률·완주율·열린 품질 경고가 이걸 쓴다.
+          # 없으면 WARN 이 전부 '확인 불가'로 잡힌다(완주 여부를 모르면 가용을 주장하지 않는다).
+          git show origin/gh-pages:coverage.json > /tmp/coverage.json 2>/dev/null || echo '{}' > /tmp/coverage.json
 
           CURRENT_STATUS=$(python3 -c "import json; d=json.load(open('report-status.json')); print(d.get('status','UNKNOWN'))" 2>/dev/null || echo "UNKNOWN")
           echo "HEALTH_STATUS=$CURRENT_STATUS" >> $GITHUB_ENV
@@ -93,7 +97,8 @@ jobs:
 
           # 상태 이력·집계는 운영 런에서만 갱신한다 — 검증 런이 섞이면 가동률과 알림 판정이 왜곡된다.
           if [ "$IS_PRODUCTION_RUN" = "true" ]; then
-            python3 scripts/update_statuses.py "$DATETIME" "$CURRENT_STATUS"
+            COVERAGE=$(python3 -c "import json; print(str(json.load(open('report-status.json')).get('coverageComplete','')).lower())" 2>/dev/null || echo "")
+            python3 scripts/update_statuses.py "$DATETIME" "$CURRENT_STATUS" "$COVERAGE"
             python3 scripts/update_perf.py "$DATETIME"
             python3 scripts/update_failures.py "$DATETIME"
           else
@@ -109,6 +114,7 @@ jobs:
           echo "FAIL_STREAK=$FAIL_STREAK" >> $GITHUB_ENV
 
           cp /tmp/statuses.json reports/statuses.json
+          cp /tmp/coverage.json reports/coverage.json 2>/dev/null || true
           cp /tmp/perf-history.json reports/perf-history.json
           cp /tmp/monthly-stats.json reports/monthly-stats.json
           cp /tmp/daily-stats.json reports/daily-stats.json
@@ -118,7 +124,7 @@ jobs:
           # 보존되는 이번 런 폴더에 스냅샷을 남겨 최근 120일치 복구 지점을 확보한다(폴더가 prune되면 함께 정리됨).
           cp /tmp/monthly-stats.json /tmp/daily-stats.json reports/$DATETIME/
 
-          python3 scripts/generate_index.py /tmp/all_runs.txt "$DATETIME" /tmp/statuses.json /tmp/perf-history.json /tmp/monthly-stats.json /tmp/daily-stats.json /tmp/failures-history.json reports/index.html
+          python3 scripts/generate_index.py /tmp/all_runs.txt "$DATETIME" /tmp/statuses.json /tmp/perf-history.json /tmp/monthly-stats.json /tmp/daily-stats.json /tmp/failures-history.json reports/index.html /tmp/coverage.json
 
       - name: 대용량 파일 제거 (GitHub 100MB 제한 대응)
         run: find reports -name "*.zip" -size +50M -delete
