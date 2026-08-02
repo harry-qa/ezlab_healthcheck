@@ -98,7 +98,7 @@ _chrono = sorted(entries)  # 과거 → 현재
 open_warnings, resolved_warnings = open_quality_warnings(
     _chrono, {r: _warn_fps(r) for r in _chrono}, {r: _cov(r) for r in _chrono})
 
-status_label, status_key = current_state(cur_status, cur_cov, len(open_warnings))
+_status_label, status_key = current_state(cur_status, cur_cov, len(open_warnings))
 
 def _fmt_rate(v):
     return f'{v}%' if v is not None else '데이터 없음'
@@ -118,6 +118,8 @@ cur_date_str, cur_time_str = current_run.split('_')
 cur_display = f"{cur_date_str} {cur_time_str.replace('-', ':')}"
 
 # ── Overview card HTML ────────────────────────────────────────────────
+# '가용률/열린 경고/현재 상태'를 같은 크기의 카드로 나열하면 서비스 장애와 품질 이슈가
+# 동급처럼 보인다. 현재 서비스 상태를 한 문장으로 먼저 보여주고, 기간 지표는 아래 보조 카드로 둔다.
 # 가용률 색은 장애 기준으로만 판단한다 — 품질 경고는 여기서 색을 바꾸지 않는다.
 avail_cls = (
     'score-neutral' if avail_rate is None else
@@ -126,82 +128,185 @@ avail_cls = (
     'score-warn'    if avail_rate >= 95 else
     'score-bad'
 )
+service_visual_key = 'pass' if status_key in ('pass', 'warn') else status_key
 status_dot_html = {
     'pass':    '<span class="dot dot-pass"></span>',
     'warn':    '<span class="dot dot-warn"></span>',
     'fail':    '<span class="dot dot-fail"></span>',
     'unknown': '<span class="dot dot-unknown"></span>',
+}[service_visual_key]
+status_panel_cls = {'pass': 'status-hero--pass', 'warn': 'status-hero--pass',
+                    'fail': 'status-hero--fail', 'unknown': 'status-hero--unknown'}[status_key]
+status_headline = {
+    'pass': '정상 운영 중',
+    'warn': '정상 운영 중',
+    'fail': '장애 감지',
+    'unknown': '점검 결과 확인 필요',
 }[status_key]
-status_card_cls = {'pass': 'ov-card--pass', 'warn': 'ov-card--warn',
-                   'fail': 'ov-card--fail', 'unknown': ''}[status_key]
+if status_key == 'fail':
+    status_description = '최근 점검에서 서비스 이용에 영향을 줄 수 있는 장애를 감지했습니다.'
+elif status_key == 'unknown':
+    status_description = '점검이 끝까지 완료되지 않아 현재 서비스 상태를 확정할 수 없습니다.'
+elif open_warnings:
+    status_description = f'서비스 이용은 정상입니다. 확인이 필요한 항목 {len(open_warnings)}건을 별도로 추적 중입니다.'
+elif status_key == 'warn':
+    status_description = '서비스 이용은 정상입니다. 이번 실행의 경고 상세는 아래 점검 내역에서 확인할 수 있습니다.'
+else:
+    status_description = '최근 점검에서 서비스 장애와 추가 확인 항목이 발견되지 않았습니다.'
+
+if status_key == 'fail':
+    status_action = f'최근 24시간 장애 {fail_24h}건'
+    status_action_cls = 'status-action--fail'
+elif status_key == 'unknown':
+    status_action = '점검 미완료'
+    status_action_cls = 'status-action--unknown'
+elif open_warnings:
+    status_action = f'확인 필요 {len(open_warnings)}건'
+    status_action_cls = 'status-action--warn'
+else:
+    status_action = '추가 확인 없음'
+    status_action_cls = 'status-action--pass'
 alert_cls = 'val-danger' if fail_24h > 0 else 'val-ok'
 alert_val = f'{fail_24h}건' if fail_24h > 0 else '이상 없음'
 
-open_cls = 'val-ok' if not open_warnings else 'score-warn'
-open_val = '없음' if not open_warnings else f'{len(open_warnings)}건'
 # 완주 표본이 너무 적으면 비율을 적지 않는다 — 4건 중 3건으로 '75%'를 적으면 과대해석된다.
 comp_display = ('데이터 부족' if comp_known < 10 and comp_known > 0 else _fmt_rate(comp_rate))
-comp_sub = (f'완주 {comp_done}/{comp_known}회'
-            + (f' · 기록 없음 {total - comp_known}회' if total - comp_known else ''))
+comp_sub = (f'완주 기록 {comp_done}/{comp_known}회'
+            if comp_known else '완주 기록 없음')
 
 overview_html = f'''
-    <div class="ov-grid">
-      <div class="ov-card">
-        <div class="ov-label">서비스 가용률</div>
-        <div class="ov-value {avail_cls}">{_fmt_rate(avail_rate)}</div>
-        <div class="ov-sub">가용 {svc_counts[AVAILABLE]} · 장애 {svc_counts[OUTAGE]} · 확인 불가 {svc_counts[INDETERMINATE]}</div>
+    <section class="status-hero {status_panel_cls}">
+      <div class="status-copy">
+        <div class="status-eyebrow">현재 서비스</div>
+        <div class="status-title-row">{status_dot_html}<strong>{escape(status_headline)}</strong></div>
+        <p>{escape(status_description)}</p>
       </div>
-      <div class="ov-card {status_card_cls}">
-        <div class="ov-label">현재 상태</div>
-        <div class="ov-status-row">{status_dot_html}<span class="ov-status-text">{escape(status_label)}</span></div>
-        <div class="ov-sub">{cur_display} KST</div>
+      <div class="status-aside">
+        <span class="status-action {status_action_cls}">{escape(status_action)}</span>
+        <span class="status-time">{cur_display} KST</span>
       </div>
-      <div class="ov-card">
-        <div class="ov-label">열린 품질 경고</div>
-        <div class="ov-value {open_cls}">{open_val}</div>
-        <div class="ov-sub">완주 실행 기준 · 중복 제거</div>
+    </section>
+    <div class="metric-grid">
+      <div class="metric-card">
+        <div class="metric-label">최근 {total}회 정상률</div>
+        <div class="metric-value {avail_cls}">{_fmt_rate(avail_rate)}</div>
+        <div class="metric-sub">정상 {svc_counts[AVAILABLE]} · 장애 {svc_counts[OUTAGE]} · 확인 불가 {svc_counts[INDETERMINATE]}</div>
       </div>
-      <div class="ov-card">
-        <div class="ov-label">점검 완주율</div>
-        <div class="ov-value">{comp_display}</div>
-        <div class="ov-sub">{comp_sub}</div>
+      <div class="metric-card">
+        <div class="metric-label">최근 24시간 장애 감지</div>
+        <div class="metric-value {alert_cls}">{alert_val}</div>
+        <div class="metric-sub">서비스 장애(FAIL) 판정 기준</div>
+      </div>
+      <div class="metric-card">
+        <div class="metric-label">점검 완료율</div>
+        <div class="metric-value">{comp_display}</div>
+        <div class="metric-sub">{comp_sub}</div>
       </div>
     </div>
-    <div class="ov-note">
-      <span><b>서비스 가용률</b> = 가용 / (가용 + 장애). FAIL 만 장애로 셉니다.
-        완주 실행의 WARN 은 사용자가 서비스를 쓸 수 있었으므로 가용, 미완주·UNKNOWN 은 확인 불가로 분모에서 제외합니다.</span>
-      <span><b>무경고 실행률</b> {_fmt_rate(nowarn_rate)} <span class="muted">(최근 {nowarn_scored}회 · 경고 없이 완벽했던 실행 비율 — 검사를 추가하면 낮아지는 것이 정상인 보조 지표)</span></span>
-      <span><b>최근 24시간 장애</b> <span class="note-{alert_cls}">{alert_val}</span> <span class="muted">FAIL 감지 횟수</span></span>
-    </div>'''
+    <details class="metric-help">
+      <summary>지표 계산 기준</summary>
+      <div class="metric-help-body">
+        <span><b>서비스 정상률</b>은 정상 이용 가능 실행을 기준으로 계산하며, 점검 미완료·UNKNOWN은 분모에서 제외합니다.</span>
+        <span><b>경고 없는 실행</b> {_fmt_rate(nowarn_rate)} <span class="muted">(최근 {nowarn_scored}회 · 검사를 추가하면 낮아질 수 있는 보조 지표)</span></span>
+        <span>완주 여부 기록이 없는 과거 실행 {total - comp_known}회는 점검 완료율 계산에서 제외했습니다.</span>
+      </div>
+    </details>'''
 
 # ── 열린 품질 경고 목록 ────────────────────────────────────────────────
 # 런 단위로 세면 결함 하나가 30분마다 새 경고로 잡힌다(실측: 'WARN 22건' = OG 403 하나가 22회).
 # 지문 단위로 묶고 최초·최근 감지와 연속 검출 횟수를 함께 보여 조치 근거로 쓰게 한다.
+def _warning_display(fingerprint):
+    """내부 지문을 사용자에게 노출할 파일/경로·오류 유형·미리보기 URL로 나눈다."""
+    resource, kind = (fingerprint.rsplit('|', 1) + [''])[:2] if '|' in fingerprint else (fingerprint, '')
+    clean = resource.split('?', 1)[0].rstrip('/')
+    leaf = clean.rsplit('/', 1)[-1] if '/' in clean else clean
+    # 파일이면 파일명을 제목으로, 페이지/호스트면 전체 경로를 제목으로 쓴다.
+    title = leaf if re.search(r'\.[a-z0-9]{2,5}$', leaf, re.I) else clean
+    kind_label = {
+        'HTTP_4XX': 'HTTP 4xx 응답',
+        'HTTP_5XX': 'HTTP 5xx 응답',
+        'TIMEOUT': '응답 시간 초과',
+        'NETWORK': '네트워크 연결 실패',
+        'CONTENT': '콘텐츠 확인 실패',
+    }.get(kind, kind.replace('_', ' ').strip() or '점검 경고')
+    # 이미지 경고만 사용자가 클릭했을 때 원본을 불러온다. 평소에는 추가 요청이 없다.
+    preview_url = None
+    if re.search(r'\.(?:avif|gif|jpe?g|png|webp)$', leaf, re.I):
+        if re.match(r'^https?://', clean, re.I):
+            preview_url = clean
+        elif clean and not clean.startswith(('/', '.')):
+            preview_url = f'https://{clean}'
+    return title or fingerprint, clean or fingerprint, kind_label, preview_url
+
+def _display_run_time(run):
+    try:
+        return datetime.strptime(run, '%Y-%m-%d_%H-%M').strftime('%Y-%m-%d %H:%M')
+    except (ValueError, TypeError):
+        return str(run).replace('_', ' ')
+
 if open_warnings:
     rows = ''
-    for w in open_warnings:
+    for issue_idx, w in enumerate(open_warnings):
         miss = (f'<span class="qw-miss">최근 {w["missed"]}회 미검출</span>' if w['missed'] else '')
+        issue_title, issue_resource, issue_kind, preview_url = _warning_display(w['fingerprint'])
+        if preview_url:
+            preview_id = f'issue-preview-{issue_idx}'
+            title_html = f'''
+            <button type="button" class="issue-title issue-title-btn"
+                    data-preview-url="{escape(preview_url, quote=True)}"
+                    aria-expanded="false" aria-controls="{preview_id}"
+                    onclick="toggleIssuePreview('{preview_id}', this)">
+              <span>{escape(issue_title)}</span><span class="issue-preview-hint">이미지 보기</span>
+            </button>'''
+            preview_html = f'''
+          <div id="{preview_id}" class="issue-preview hidden" data-loaded="false">
+            <div class="issue-preview-head">
+              <strong>이미지 미리보기</strong>
+              <a href="{escape(preview_url, quote=True)}" target="_blank" rel="noopener noreferrer">원본 응답 열기 ↗</a>
+            </div>
+            <div class="issue-preview-stage">
+              <span class="issue-preview-loading">이미지를 불러오는 중입니다.</span>
+              <img class="issue-preview-img hidden" alt="{escape(issue_title, quote=True)} 미리보기" decoding="async">
+              <div class="issue-preview-error hidden">
+                <strong>현재 이미지를 불러올 수 없습니다.</strong>
+                <span>{escape(issue_kind)}이 계속되고 있거나 브라우저가 해당 응답을 이미지로 표시할 수 없습니다.</span>
+              </div>
+            </div>
+          </div>'''
+        else:
+            title_html = f'<strong class="issue-title">{escape(issue_title)}</strong>'
+            preview_html = ''
         rows += f'''
-        <tr>
-          <td class="qw-fp">{escape(w['fingerprint'])}</td>
-          <td class="qw-num">{w['detected']}회</td>
-          <td class="qw-when">{escape(w['first'].replace('_', ' ').replace('-', ':', 2)[:16])}</td>
-          <td class="qw-when">{escape(w['last'].replace('_', ' ').replace('-', ':', 2)[:16])}</td>
-          <td>{miss}</td>
-        </tr>'''
+        <div class="issue-item">
+          <div class="issue-row">
+            <div class="issue-main">
+              {title_html}
+              <span class="issue-meta">{escape(issue_resource)} · {escape(issue_kind)}</span>
+            </div>
+            <div class="issue-count"><span>{w['detected']}회 확인</span>{miss}</div>
+            <div class="issue-dates">
+              <span><small>처음</small>{escape(_display_run_time(w['first']))}</span>
+              <span><small>최근</small>{escape(_display_run_time(w['last']))}</span>
+            </div>
+          </div>
+          {preview_html}
+        </div>'''
     quality_html = f'''
-    <div class="card">
-      <div class="card-title">열린 품질 경고 <span class="card-sub">{len(open_warnings)}건 · 완주 실행 2회 연속 미검출 시 해결 처리</span></div>
-      <table class="qw-table">
-        <thead><tr><th>장애 지문</th><th>검출</th><th>최초 감지</th><th>최근 감지</th><th></th></tr></thead>
-        <tbody>{rows}</tbody>
-      </table>
+    <div class="card quality-card">
+      <div class="quality-head">
+        <div><div class="card-title">확인이 필요한 항목</div>
+        <div class="card-sub">서비스는 정상 이용 가능하며, 아래 {len(open_warnings)}건을 계속 확인하고 있습니다.</div></div>
+        <span class="quality-count">{len(open_warnings)}건</span>
+      </div>
+      <div class="issue-list">{rows}</div>
+      <div class="quality-foot">완주한 점검에서 2회 연속 다시 발견되지 않으면 자동으로 목록에서 정리됩니다.</div>
     </div>'''
 else:
     quality_html = f'''
-    <div class="card">
-      <div class="card-title">열린 품질 경고 <span class="card-sub">완주 실행 기준</span></div>
-      <div class="qw-empty">열린 품질 경고가 없습니다.</div>
+    <div class="card quality-card">
+      <div class="quality-head"><div><div class="card-title">확인이 필요한 항목</div>
+      <div class="card-sub">최근 완료된 점검 기준</div></div><span class="quality-count quality-count--ok">0건</span></div>
+      <div class="qw-empty">현재 추가로 확인할 항목이 없습니다.</div>
     </div>'''
 
 # ── Response time line chart ──────────────────────────────────────────
@@ -386,8 +491,8 @@ def make_donut_svg(avail_n, outage_n, indet_n, rate):
 
 # 마이그레이션이 끝나지 않았으면 화면에 그 사실을 적는다 — 숫자만 보면 보수적 환산값을
 # 서비스 가용률로 오해한다(백필 전 WARN 이 전부 확인 불가로 잡혀 실제보다 낮게 나온다).
-monthly_note = ('<span class="section-sub">서비스 가용률</span>' if stats_migrated else
-                '<span class="section-sub section-sub--warn">서비스 가용률 · 집계 마이그레이션 전 —'
+monthly_note = ('<span class="section-sub">서비스 정상률</span>' if stats_migrated else
+                '<span class="section-sub section-sub--warn">서비스 정상률 · 집계 마이그레이션 전 —'
                 ' WARN 을 전부 확인 불가로 환산한 보수적 값입니다'
                 ' (<code>scripts/backfill_stats.py</code> 실행 필요)</span>')
 
@@ -407,7 +512,7 @@ if monthly_stats:
       <div class="month-card">
         <div class="month-card-title">{label}</div>
         {donut}
-        <div class="month-sub">서비스 가용률</div>
+        <div class="month-sub">서비스 정상률</div>
         <div class="month-legend">
           <span class="leg-warn">WARN {w}</span>
           <span class="leg-fail">FAIL {o_n}</span>
@@ -635,25 +740,41 @@ css = """
   .card { background: #161b22; border: 1px solid #21262d; border-radius: 10px;
           padding: 18px 20px; margin-bottom: 18px; }
 
-  /* Overview grid */
-  .ov-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 10px; }
-  .ov-card { background: #161b22; border: 1px solid #21262d; border-radius: 10px;
-             padding: 18px 16px; }
-  .ov-card--pass { border-color: #2ea043; }
-  .ov-card--warn { border-color: #9e6a03; }
-  .ov-card--fail { border-color: #b91c1c; }
-  .ov-label { font-size: .72rem; color: #8b949e; font-weight: 600;
-              text-transform: uppercase; letter-spacing: .05em; margin-bottom: 8px; }
-  .ov-value { font-size: 1.9rem; font-weight: 800; line-height: 1; margin-bottom: 6px; }
+  /* Current service first, historical metrics second */
+  .status-hero { display: flex; justify-content: space-between; align-items: center; gap: 24px;
+                 background: linear-gradient(135deg, #111820 0%, #161b22 72%);
+                 border: 1px solid #2d333b; border-radius: 12px; padding: 22px 24px;
+                 margin-bottom: 12px; }
+  .status-hero--pass { border-color: #238636; box-shadow: inset 3px 0 0 #3fb950; }
+  .status-hero--fail { border-color: #b91c1c; box-shadow: inset 3px 0 0 #f85149; }
+  .status-hero--unknown { border-color: #484f58; box-shadow: inset 3px 0 0 #6e7681; }
+  .status-copy { min-width: 0; }
+  .status-eyebrow { color: #8b949e; font-size: .7rem; font-weight: 700;
+                    letter-spacing: .08em; text-transform: uppercase; margin-bottom: 7px; }
+  .status-title-row { display: flex; align-items: center; gap: 10px; }
+  .status-title-row strong { color: #f0f6fc; font-size: 1.45rem; line-height: 1.25; }
+  .status-copy p { color: #8b949e; font-size: .78rem; line-height: 1.55; margin-top: 7px; }
+  .status-aside { display: flex; flex-direction: column; align-items: flex-end; gap: 7px; flex-shrink: 0; }
+  .status-action { display: inline-flex; align-items: center; border-radius: 999px; padding: 5px 10px;
+                   font-size: .72rem; font-weight: 700; white-space: nowrap; border: 1px solid transparent; }
+  .status-action--pass { color: #56d364; background: #0f2d1a; border-color: #1d4b2a; }
+  .status-action--warn { color: #e3b341; background: #2d2008; border-color: #5f450d; }
+  .status-action--fail { color: #ff7b72; background: #2d0f0f; border-color: #6e2020; }
+  .status-action--unknown { color: #adbac7; background: #21262d; border-color: #30363d; }
+  .status-time { color: #484f58; font-size: .68rem; white-space: nowrap; }
+
+  .metric-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 10px; }
+  .metric-card { background: #161b22; border: 1px solid #21262d; border-radius: 10px;
+                 padding: 15px 16px; min-width: 0; }
+  .metric-label { font-size: .7rem; color: #8b949e; font-weight: 650; margin-bottom: 8px; }
+  .metric-value { color: #e6edf3; font-size: 1.55rem; font-weight: 800; line-height: 1; margin-bottom: 7px; }
+  .metric-sub { font-size: .68rem; color: #5f6772; line-height: 1.4; }
   .score-great { color: #3fb950; }
   .score-good  { color: #56d364; }
   .score-warn  { color: #d29922; }
   .score-bad   { color: #f85149; }
-  .val-ok      { color: #3fb950; font-size: 1.4rem; }
-  .val-danger  { color: #f85149; font-size: 1.4rem; }
-  .ov-status-row { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
-  .ov-status-text { font-size: 1.15rem; font-weight: 700; color: #e6edf3; }
-  .ov-sub { font-size: .72rem; color: #484f58; }
+  .val-ok      { color: #3fb950; }
+  .val-danger  { color: #f85149; }
 
   /* Status dots */
   .dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
@@ -713,30 +834,68 @@ css = """
   .section-sub--warn code { background: #21262d; padding: 1px 5px; border-radius: 4px; }
   .month-total { font-size: .65rem; color: #484f58; margin-top: 5px; }
 
-  /* 지표 설명 · 보조 지표 */
-  .ov-note { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 4px;
-             padding: 12px 14px; background: #0d1117; border: 1px solid #21262d;
-             border-radius: 10px; font-size: .74rem; color: #8b949e; line-height: 1.6; }
-  .ov-note b { color: #c9d1d9; font-weight: 600; }
-  .ov-note .muted { color: #6e7681; }
-  /* 설명줄 안의 값은 카드 수치(.val-*)와 달리 본문 크기로 — 크게 뜨면 보조 지표가 주 지표처럼 보인다 */
-  .note-val-ok { color: #3fb950; font-weight: 600; }
-  .note-val-danger { color: #f85149; font-weight: 600; }
+  /* 지표 설명은 기본 화면에서 접어 둔다. */
+  .metric-help { margin: 3px 0 18px; color: #6e7681; font-size: .7rem; }
+  .metric-help summary { width: fit-content; cursor: pointer; color: #6e7681; padding: 3px 2px;
+                         user-select: none; }
+  .metric-help summary:hover { color: #8b949e; }
+  .metric-help-body { display: flex; flex-direction: column; gap: 5px; margin-top: 6px;
+                      padding: 10px 12px; background: #0d1117; border: 1px solid #21262d;
+                      border-radius: 8px; line-height: 1.55; }
+  .metric-help-body b { color: #c9d1d9; font-weight: 600; }
+  .metric-help-body .muted { color: #5f6772; }
   .score-neutral { color: #8b949e; }
 
-  /* 열린 품질 경고 */
-  .card-sub { font-size: .7rem; font-weight: 500; color: #6e7681; margin-left: 8px; }
-  .qw-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: .74rem; }
-  .qw-table th { text-align: left; color: #6e7681; font-weight: 600; padding: 6px 10px;
-                 border-bottom: 1px solid #21262d; white-space: nowrap; }
-  .qw-table td { padding: 8px 10px; border-bottom: 1px solid #161b22; color: #c9d1d9;
-                 vertical-align: top; }
-  .qw-fp { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all;
-           color: #d29922; }
-  .qw-num { white-space: nowrap; color: #8b949e; }
-  .qw-when { white-space: nowrap; color: #6e7681; font-size: .7rem; }
-  .qw-miss { font-size: .68rem; color: #6e7681; }
-  .qw-empty { color: #6e7681; font-size: .78rem; padding: 10px 2px; }
+  /* 확인이 필요한 항목 — 내부 지문 대신 파일/경로와 오류 유형을 보여준다. */
+  .quality-card { padding: 18px 20px 14px; }
+  .quality-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+  .card-title { color: #e6edf3; font-size: .9rem; font-weight: 700; }
+  .card-sub { display: block; font-size: .7rem; font-weight: 500; color: #6e7681; margin-top: 4px; }
+  .quality-count { display: inline-flex; align-items: center; justify-content: center; min-width: 38px;
+                   border-radius: 999px; padding: 4px 9px; background: #2d2008; color: #e3b341;
+                   border: 1px solid #5f450d; font-size: .72rem; font-weight: 700; white-space: nowrap; }
+  .quality-count--ok { background: #0f2d1a; color: #56d364; border-color: #1d4b2a; }
+  .issue-list { margin-top: 14px; border-top: 1px solid #21262d; }
+  .issue-item { border-bottom: 1px solid #21262d; }
+  .issue-row { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center;
+               gap: 18px; padding: 13px 2px; }
+  .issue-main { min-width: 0; }
+  .issue-title { display: block; color: #e6edf3; font-size: .8rem; margin-bottom: 4px; }
+  .issue-title-btn { width: fit-content; max-width: 100%; padding: 0; border: 0; background: none;
+                     font: inherit; font-weight: 700; text-align: left; cursor: pointer; }
+  .issue-title-btn > span:first-child { text-decoration: underline; text-decoration-color: #30363d;
+                                        text-underline-offset: 3px; }
+  .issue-title-btn:hover > span:first-child { color: #58a6ff; text-decoration-color: #58a6ff; }
+  .issue-title-btn:focus-visible { outline: 2px solid #58a6ff; outline-offset: 4px; border-radius: 2px; }
+  .issue-preview-hint { display: inline-flex; margin-left: 8px; padding: 2px 6px; border: 1px solid #30363d;
+                        border-radius: 999px; color: #8b949e; font-size: .59rem; font-weight: 650;
+                        line-height: 1.2; vertical-align: 1px; text-decoration: none; }
+  .issue-meta { display: block; color: #6e7681; font-size: .68rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .issue-count { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; color: #d29922;
+                 font-size: .7rem; font-weight: 650; white-space: nowrap; }
+  .issue-dates { display: flex; flex-direction: column; gap: 4px; min-width: 126px; color: #8b949e;
+                 font-size: .67rem; font-variant-numeric: tabular-nums; }
+  .issue-dates span { display: flex; gap: 7px; justify-content: space-between; }
+  .issue-dates small { color: #484f58; font-size: .64rem; }
+  .issue-preview { margin: 0 2px 14px; overflow: hidden; border: 1px solid #30363d;
+                   border-radius: 9px; background: #0d1117; }
+  .issue-preview-head { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+                        padding: 9px 11px; border-bottom: 1px solid #21262d; font-size: .69rem; }
+  .issue-preview-head strong { color: #c9d1d9; font-weight: 650; }
+  .issue-preview-head a { color: #58a6ff; text-decoration: none; white-space: nowrap; }
+  .issue-preview-head a:hover { text-decoration: underline; }
+  .issue-preview-stage { display: flex; min-height: 148px; align-items: center; justify-content: center;
+                         padding: 14px; background: #090c10; }
+  .issue-preview-loading { color: #6e7681; font-size: .72rem; }
+  .issue-preview-img { display: block; max-width: 100%; max-height: 420px; border-radius: 6px;
+                       object-fit: contain; background: #fff; }
+  .issue-preview-error { display: flex; max-width: 420px; flex-direction: column; align-items: center;
+                         gap: 6px; color: #8b949e; font-size: .71rem; line-height: 1.5; text-align: center; }
+  .issue-preview-error strong { color: #f0b04b; font-size: .78rem; }
+  .qw-miss { font-size: .62rem; color: #6e7681; font-weight: 500; }
+  .quality-foot { color: #484f58; font-size: .66rem; line-height: 1.45; padding-top: 10px; }
+  .qw-empty { color: #6e7681; font-size: .78rem; padding: 20px 2px 8px; }
 
   /* Filter tabs */
   .filter-bar { display: flex; gap: 4px; padding: 14px 16px 0; border-bottom: 1px solid #21262d;
@@ -886,8 +1045,14 @@ css = """
   .cert-scale { display: flex; justify-content: space-between; font-size: .66rem; color: #484f58; margin-top: 5px; }
 
   @media (max-width: 540px) {
-    .ov-grid { grid-template-columns: 1fr 1fr; }
-    .ov-grid > .ov-card:last-child { grid-column: span 2; }
+    .status-hero { flex-direction: column; align-items: flex-start; gap: 12px; padding: 18px; }
+    .status-aside { width: 100%; flex-direction: row; align-items: center; justify-content: space-between; }
+    .status-title-row strong { font-size: 1.25rem; }
+    .metric-grid { grid-template-columns: 1fr; }
+    .issue-row { grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
+    .issue-count { grid-column: 2; grid-row: 1; }
+    .issue-dates { grid-column: 1 / -1; flex-direction: row; min-width: 0; }
+    .issue-dates span { justify-content: flex-start; }
     .spark-grid { grid-template-columns: repeat(2, 1fr); }
     .perf-summary { display: none; }
     .cert-grid { grid-template-columns: 1fr; }
@@ -979,7 +1144,7 @@ html = f"""<!DOCTYPE html>
   {cert_panel_html}
 
   <div class="card">
-    <div class="section-title">일별 가동률<span class="section-sub">최근 90일</span></div>
+    <div class="section-title">일별 점검 결과<span class="section-sub">최근 90일</span></div>
     <div class="heatmap-legend">
       <span class="hm-item"><span class="hm-dot" style="background:#3fb950"></span>PASS</span>
       <span class="hm-item"><span class="hm-dot" style="background:#d29922"></span>WARN 포함</span>
@@ -1082,6 +1247,38 @@ function toggleDetail(eid) {{
 }}
 
 // ── Status filter tabs ────────────────────────────────────────────────
+function toggleIssuePreview(id, button) {{
+  var panel = document.getElementById(id);
+  if (!panel) return;
+
+  var willOpen = panel.classList.contains('hidden');
+  panel.classList.toggle('hidden', !willOpen);
+  button.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+  var hint = button.querySelector('.issue-preview-hint');
+  if (hint) hint.textContent = willOpen ? '이미지 닫기' : '이미지 보기';
+
+  if (!willOpen || panel.dataset.loaded === 'true') return;
+  panel.dataset.loaded = 'true';
+
+  var img = panel.querySelector('.issue-preview-img');
+  var loading = panel.querySelector('.issue-preview-loading');
+  var error = panel.querySelector('.issue-preview-error');
+  var url = button.dataset.previewUrl;
+  if (!img || !url) return;
+
+  img.onload = function() {{
+    if (loading) loading.classList.add('hidden');
+    if (error) error.classList.add('hidden');
+    img.classList.remove('hidden');
+  }};
+  img.onerror = function() {{
+    if (loading) loading.classList.add('hidden');
+    img.classList.add('hidden');
+    if (error) error.classList.remove('hidden');
+  }};
+  img.src = url;
+}}
+
 function filterRuns(status, btn) {{
   document.querySelectorAll('.tab-btn').forEach(function(b) {{ b.classList.remove('active'); }});
   btn.classList.add('active');
