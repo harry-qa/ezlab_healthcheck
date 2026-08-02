@@ -1,1 +1,42 @@
-{"2026-04": {"PASS": 161, "WARN": 0, "FAIL": 0}, "2026-05": {"PASS": 242, "WARN": 0, "FAIL": 0}, "2026-06": {"PASS": 262, "WARN": 0, "FAIL": 1}, "2026-07": {"PASS": 368, "WARN": 30, "FAIL": 6}, "2026-08": {"PASS": 0, "WARN": 23, "FAIL": 2}}
+{
+  "2026-04": {
+    "PASS": 161,
+    "WARN": 0,
+    "FAIL": 0,
+    "avail": 161,
+    "outage": 0,
+    "indet": 0
+  },
+  "2026-05": {
+    "PASS": 242,
+    "WARN": 0,
+    "FAIL": 0,
+    "avail": 242,
+    "outage": 0,
+    "indet": 0
+  },
+  "2026-06": {
+    "PASS": 262,
+    "WARN": 0,
+    "FAIL": 1,
+    "avail": 262,
+    "outage": 1,
+    "indet": 0
+  },
+  "2026-07": {
+    "PASS": 368,
+    "WARN": 30,
+    "FAIL": 6,
+    "avail": 369,
+    "outage": 6,
+    "indet": 29
+  },
+  "2026-08": {
+    "PASS": 0,
+    "WARN": 23,
+    "FAIL": 2,
+    "avail": 20,
+    "outage": 2,
+    "indet": 3
+  }
+}
