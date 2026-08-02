@@ -1,10 +1,18 @@
 import sys
+import os
 import re
 import json
 import math
 from html import escape
 from datetime import datetime, timedelta
 from collections import defaultdict
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from dashboard_metrics import (
+    AVAILABLE, OUTAGE, INDETERMINATE,
+    classify_counts, availability, completion_rate, no_warning_rate,
+    open_quality_warnings, current_state, month_buckets, is_migrated,
+)
 
 # ── CLI args ──────────────────────────────────────────────────────────
 runs_file    = sys.argv[1]
@@ -15,6 +23,13 @@ monthly_file  = sys.argv[5]
 daily_file    = sys.argv[6]
 failures_file = sys.argv[7]
 output_file   = sys.argv[8]
+# 런별 점검 완주 여부. 없으면 빈 dict — 그 경우 WARN 은 전부 '확인 불가'로 분류된다
+# (완주 여부를 모르는데 가용으로 세면 없는 근거로 가용률을 부풀리게 된다).
+coverage_file = sys.argv[9] if len(sys.argv) > 9 else None
+# 집계 스키마 상태(stats-meta.json). 백필 완료 표시가 없으면 월별 지표는 서비스 분류 벡터를
+# 쓰지 않고 보수적 환산으로 통일한다 — 일부 월에만 벡터가 있는 상태를 정상 데이터로 읽으면
+# 백필 전 월이 0% 로 표시돼 '그 달에 서비스가 죽어 있었다'는 잘못된 결론이 나온다.
+meta_file     = sys.argv[10] if len(sys.argv) > 10 else None
 
 # ── Load data ─────────────────────────────────────────────────────────
 with open(runs_file) as f:
@@ -35,6 +50,13 @@ perf_history     = load_json(perf_file, {})
 monthly_stats    = load_json(monthly_file, {})
 daily_stats      = load_json(daily_file, {})
 failures_history = load_json(failures_file, {})
+# coverage.json 은 없거나 깨져 있어도 대시보드 생성을 막지 않는다 — 그 경우 완주 여부를
+# '모름'으로 두고 지표가 '데이터 없음/부족'으로 표시되게 한다(대시보드가 통째로 죽는 것보다 낫다).
+coverage_map     = load_json(coverage_file, {}) if coverage_file else {}
+if not isinstance(coverage_map, dict):
+    coverage_map = {}
+stats_meta       = load_json(meta_file, {}) if meta_file else {}
+stats_migrated   = is_migrated(stats_meta)
 
 # ── Constants ─────────────────────────────────────────────────────────
 LANGS       = ['ko', 'en', 'jp', 'tw']
@@ -43,16 +65,43 @@ BASE_URL    = 'https://ezlab.im'
 THRESHOLD   = 500  # ms danger threshold (TTFB 첫 응답 기준 · 본문 다운로드 제외)
 
 # ── Overview stats ────────────────────────────────────────────────────
+# 지표를 넷으로 분리한다(산식·근거는 dashboard_metrics.py 참고).
+# 예전엔 PASS/(PASS+WARN+FAIL) 하나뿐이라 품질 경고가 장애와 똑같이 감점됐고,
+# 그래서 검사를 추가할수록 '가동률'이 떨어지는 구조였다.
 total  = len(entries)
 pass_c = sum(1 for e in entries if statuses.get(e) == 'PASS')
 fail_c = sum(1 for e in entries if statuses.get(e) == 'FAIL')
 warn_c = sum(1 for e in entries if statuses.get(e) == 'WARN')
 
-# Health Score는 사이트 상태가 실제 판정된 런만 분모로 사용 —
-# UNKNOWN(러너 인프라 문제로 미완주)이 사이트 점수를 깎지 않도록.
-scored = pass_c + warn_c + fail_c
-health_score = round(pass_c / scored * 100, 1) if scored else 0
-cur_status   = statuses.get(current_run, 'UNKNOWN')
+def _cov(run):
+    """런의 완주 여부. 기록이 없으면 None(모름) — False(미완주)와 구분해야 한다."""
+    v = coverage_map.get(run)
+    return v if isinstance(v, bool) else None
+
+cur_status = statuses.get(current_run, 'UNKNOWN')
+cur_cov    = _cov(current_run)
+
+svc_counts = classify_counts([(statuses.get(e, 'UNKNOWN'), _cov(e)) for e in entries])
+avail_rate = availability(svc_counts)                       # 서비스 가용률 (주 지표)
+comp_rate, comp_done, comp_known = completion_rate([_cov(e) for e in entries])
+nowarn_rate, nowarn_scored = no_warning_rate([statuses.get(e, 'UNKNOWN') for e in entries])
+
+# 열린 품질 경고 — 런 단위가 아니라 결함(지문) 단위. 완주 실행만으로 상태를 관리한다.
+def _warn_fps(run):
+    items = failures_history.get(run, [])
+    if not isinstance(items, list):
+        items = items.get('failures', [])
+    return {i.get('fingerprint') for i in items
+            if i.get('severity') == 'WARN' and i.get('fingerprint')}
+
+_chrono = sorted(entries)  # 과거 → 현재
+open_warnings, resolved_warnings = open_quality_warnings(
+    _chrono, {r: _warn_fps(r) for r in _chrono}, {r: _cov(r) for r in _chrono})
+
+status_label, status_key = current_state(cur_status, cur_cov, len(open_warnings))
+
+def _fmt_rate(v):
+    return f'{v}%' if v is not None else '데이터 없음'
 
 # 진짜 24시간 윈도우 — 실행이 시간당이 아니라(GitHub 스케줄러가 상당수 드랍)
 # entries[:24]="최근 24회"는 약 3.4일이라 "24시간" 라벨과 안 맞음. 타임스탬프로 계산.
@@ -69,39 +118,90 @@ cur_date_str, cur_time_str = current_run.split('_')
 cur_display = f"{cur_date_str} {cur_time_str.replace('-', ':')}"
 
 # ── Overview card HTML ────────────────────────────────────────────────
-score_cls = (
-    'score-great' if health_score >= 99 else
-    'score-good'  if health_score >= 95 else
-    'score-warn'  if health_score >= 90 else
+# 가용률 색은 장애 기준으로만 판단한다 — 품질 경고는 여기서 색을 바꾸지 않는다.
+avail_cls = (
+    'score-neutral' if avail_rate is None else
+    'score-great'   if avail_rate >= 99.9 else
+    'score-good'    if avail_rate >= 99 else
+    'score-warn'    if avail_rate >= 95 else
     'score-bad'
 )
-status_dot = {
-    'PASS':    ('<span class="dot dot-pass"></span>', '정상 운영',   'ov-card--pass'),
-    'WARN':    ('<span class="dot dot-warn"></span>', '주의 필요',   'ov-card--warn'),
-    'FAIL':    ('<span class="dot dot-fail"></span>', '장애 감지',   'ov-card--fail'),
-    'UNKNOWN': ('<span class="dot dot-unknown"></span>', '알 수 없음', ''),
-}
-dot_html, status_label, status_card_cls = status_dot.get(cur_status, status_dot['UNKNOWN'])
+status_dot_html = {
+    'pass':    '<span class="dot dot-pass"></span>',
+    'warn':    '<span class="dot dot-warn"></span>',
+    'fail':    '<span class="dot dot-fail"></span>',
+    'unknown': '<span class="dot dot-unknown"></span>',
+}[status_key]
+status_card_cls = {'pass': 'ov-card--pass', 'warn': 'ov-card--warn',
+                   'fail': 'ov-card--fail', 'unknown': ''}[status_key]
 alert_cls = 'val-danger' if fail_24h > 0 else 'val-ok'
 alert_val = f'{fail_24h}건' if fail_24h > 0 else '이상 없음'
+
+open_cls = 'val-ok' if not open_warnings else 'score-warn'
+open_val = '없음' if not open_warnings else f'{len(open_warnings)}건'
+# 완주 표본이 너무 적으면 비율을 적지 않는다 — 4건 중 3건으로 '75%'를 적으면 과대해석된다.
+comp_display = ('데이터 부족' if comp_known < 10 and comp_known > 0 else _fmt_rate(comp_rate))
+comp_sub = (f'완주 {comp_done}/{comp_known}회'
+            + (f' · 기록 없음 {total - comp_known}회' if total - comp_known else ''))
 
 overview_html = f'''
     <div class="ov-grid">
       <div class="ov-card">
-        <div class="ov-label">Health Score</div>
-        <div class="ov-value {score_cls}">{health_score}%</div>
-        <div class="ov-sub">최근 {scored}회 기준</div>
+        <div class="ov-label">서비스 가용률</div>
+        <div class="ov-value {avail_cls}">{_fmt_rate(avail_rate)}</div>
+        <div class="ov-sub">가용 {svc_counts[AVAILABLE]} · 장애 {svc_counts[OUTAGE]} · 확인 불가 {svc_counts[INDETERMINATE]}</div>
       </div>
       <div class="ov-card {status_card_cls}">
-        <div class="ov-label">현재 시스템 상태</div>
-        <div class="ov-status-row">{dot_html}<span class="ov-status-text">{status_label}</span></div>
+        <div class="ov-label">현재 상태</div>
+        <div class="ov-status-row">{status_dot_html}<span class="ov-status-text">{escape(status_label)}</span></div>
         <div class="ov-sub">{cur_display} KST</div>
       </div>
       <div class="ov-card">
-        <div class="ov-label">최근 24시간 장애</div>
-        <div class="ov-value {alert_cls}">{alert_val}</div>
-        <div class="ov-sub">FAIL 감지 횟수</div>
+        <div class="ov-label">열린 품질 경고</div>
+        <div class="ov-value {open_cls}">{open_val}</div>
+        <div class="ov-sub">완주 실행 기준 · 중복 제거</div>
       </div>
+      <div class="ov-card">
+        <div class="ov-label">점검 완주율</div>
+        <div class="ov-value">{comp_display}</div>
+        <div class="ov-sub">{comp_sub}</div>
+      </div>
+    </div>
+    <div class="ov-note">
+      <span><b>서비스 가용률</b> = 가용 / (가용 + 장애). FAIL 만 장애로 셉니다.
+        완주 실행의 WARN 은 사용자가 서비스를 쓸 수 있었으므로 가용, 미완주·UNKNOWN 은 확인 불가로 분모에서 제외합니다.</span>
+      <span><b>무경고 실행률</b> {_fmt_rate(nowarn_rate)} <span class="muted">(최근 {nowarn_scored}회 · 경고 없이 완벽했던 실행 비율 — 검사를 추가하면 낮아지는 것이 정상인 보조 지표)</span></span>
+      <span><b>최근 24시간 장애</b> <span class="note-{alert_cls}">{alert_val}</span> <span class="muted">FAIL 감지 횟수</span></span>
+    </div>'''
+
+# ── 열린 품질 경고 목록 ────────────────────────────────────────────────
+# 런 단위로 세면 결함 하나가 30분마다 새 경고로 잡힌다(실측: 'WARN 22건' = OG 403 하나가 22회).
+# 지문 단위로 묶고 최초·최근 감지와 연속 검출 횟수를 함께 보여 조치 근거로 쓰게 한다.
+if open_warnings:
+    rows = ''
+    for w in open_warnings:
+        miss = (f'<span class="qw-miss">최근 {w["missed"]}회 미검출</span>' if w['missed'] else '')
+        rows += f'''
+        <tr>
+          <td class="qw-fp">{escape(w['fingerprint'])}</td>
+          <td class="qw-num">{w['detected']}회</td>
+          <td class="qw-when">{escape(w['first'].replace('_', ' ').replace('-', ':', 2)[:16])}</td>
+          <td class="qw-when">{escape(w['last'].replace('_', ' ').replace('-', ':', 2)[:16])}</td>
+          <td>{miss}</td>
+        </tr>'''
+    quality_html = f'''
+    <div class="card">
+      <div class="card-title">열린 품질 경고 <span class="card-sub">{len(open_warnings)}건 · 완주 실행 2회 연속 미검출 시 해결 처리</span></div>
+      <table class="qw-table">
+        <thead><tr><th>장애 지문</th><th>검출</th><th>최초 감지</th><th>최근 감지</th><th></th></tr></thead>
+        <tbody>{rows}</tbody>
+      </table>
+    </div>'''
+else:
+    quality_html = f'''
+    <div class="card">
+      <div class="card-title">열린 품질 경고 <span class="card-sub">완주 실행 기준</span></div>
+      <div class="qw-empty">열린 품질 경고가 없습니다.</div>
     </div>'''
 
 # ── Response time line chart ──────────────────────────────────────────
@@ -256,13 +356,20 @@ def make_heatmap():
 heatmap_svg = make_heatmap()
 
 # ── Monthly donut charts ──────────────────────────────────────────────
-def make_donut_svg(p, w, f_):
-    total = p + w + f_
+def make_donut_svg(avail_n, outage_n, indet_n, rate):
+    """월별 도넛 — 세그먼트는 가용/장애/확인 불가, 가운데 숫자는 '서비스 가용률'.
+
+    예전엔 가운데가 PASS/(PASS+WARN+FAIL) 이라 품질 경고가 장애와 같은 감점이었다.
+    가용률은 확인 불가를 분모에서 빼므로 세그먼트 비율과 가운데 숫자가 일부러 다르다
+    (확인 불가 구간은 회색으로 보이되 점수를 깎지도 올리지도 않는다).
+    """
+    total = avail_n + outage_n + indet_n
     r, circ = 38, 2 * math.pi * 38
     if total == 0:
-        return f'<svg viewBox="0 0 100 100" width="88" height="88"><circle cx="50" cy="50" r="{r}" fill="none" stroke="#1c2333" stroke-width="13"/></svg>'
+        return (f'<svg viewBox="0 0 100 100" width="88" height="88">'
+                f'<circle cx="50" cy="50" r="{r}" fill="none" stroke="#1c2333" stroke-width="13"/></svg>')
     segs, cum = [], 0.0
-    for cnt, color in [(p, '#3fb950'), (w, '#d29922'), (f_, '#f85149')]:
+    for cnt, color in [(avail_n, '#3fb950'), (outage_n, '#f85149'), (indet_n, '#6e7681')]:
         seg = circ * cnt / total
         if seg > 0:
             segs.append(
@@ -271,27 +378,40 @@ def make_donut_svg(p, w, f_):
                 f'transform="rotate(-90,50,50)"/>'
             )
         cum += seg
-    avail = round(p / total * 100)
-    center = f'<text x="50" y="55" text-anchor="middle" font-size="16" font-weight="700" fill="#e6edf3">{avail}%</text>'
+    label = f'{round(rate)}%' if rate is not None else '–'
+    size = 16 if rate is not None else 20
+    center = (f'<text x="50" y="55" text-anchor="middle" font-size="{size}" font-weight="700" '
+              f'fill="#e6edf3">{label}</text>')
     return f'<svg viewBox="0 0 100 100" width="88" height="88">{"".join(segs)}{center}</svg>'
+
+# 마이그레이션이 끝나지 않았으면 화면에 그 사실을 적는다 — 숫자만 보면 보수적 환산값을
+# 서비스 가용률로 오해한다(백필 전 WARN 이 전부 확인 불가로 잡혀 실제보다 낮게 나온다).
+monthly_note = ('<span class="section-sub">서비스 가용률</span>' if stats_migrated else
+                '<span class="section-sub section-sub--warn">서비스 가용률 · 집계 마이그레이션 전 —'
+                ' WARN 을 전부 확인 불가로 환산한 보수적 값입니다'
+                ' (<code>scripts/backfill_stats.py</code> 실행 필요)</span>')
 
 monthly_cards_html = ''
 if monthly_stats:
     for m in sorted(monthly_stats.keys(), reverse=True):
         d = monthly_stats[m]
-        p, w, f_ = d.get('PASS', 0), d.get('WARN', 0), d.get('FAIL', 0)
-        total_m = p + w + f_
+        w = d.get('WARN', 0)
+        b = month_buckets(d, stats_migrated)
+        a_n, o_n, i_n = b[AVAILABLE], b[OUTAGE], b[INDETERMINATE]
+        total_m = a_n + o_n + i_n
+        rate_m = availability(b)
         year, mon = m.split('-')
         label = f"{year}년 {int(mon)}월"
-        donut = make_donut_svg(p, w, f_)
+        donut = make_donut_svg(a_n, o_n, i_n, rate_m)
         monthly_cards_html += f'''
       <div class="month-card">
         <div class="month-card-title">{label}</div>
         {donut}
+        <div class="month-sub">서비스 가용률</div>
         <div class="month-legend">
-          <span class="leg-pass">PASS {p}</span>
           <span class="leg-warn">WARN {w}</span>
-          <span class="leg-fail">FAIL {f_}</span>
+          <span class="leg-fail">FAIL {o_n}</span>
+          <span class="leg-indet">확인 불가 {i_n}</span>
         </div>
         <div class="month-total">총 {total_m}회</div>
       </div>'''
@@ -516,7 +636,7 @@ css = """
           padding: 18px 20px; margin-bottom: 18px; }
 
   /* Overview grid */
-  .ov-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 18px; }
+  .ov-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 10px; }
   .ov-card { background: #161b22; border: 1px solid #21262d; border-radius: 10px;
              padding: 18px 16px; }
   .ov-card--pass { border-color: #2ea043; }
@@ -586,7 +706,37 @@ css = """
               background: #2d2008; color: #d29922; }
   .leg-fail { font-size: .65rem; font-weight: 600; padding: 2px 6px; border-radius: 6px;
               background: #2d0f0f; color: #f85149; }
+  .leg-indet { font-size: .65rem; font-weight: 600; padding: 2px 6px; border-radius: 6px;
+               background: #21262d; color: #8b949e; }
+  .month-sub { font-size: .62rem; color: #6e7681; margin-top: 4px; }
+  .section-sub--warn { color: #d29922; }
+  .section-sub--warn code { background: #21262d; padding: 1px 5px; border-radius: 4px; }
   .month-total { font-size: .65rem; color: #484f58; margin-top: 5px; }
+
+  /* 지표 설명 · 보조 지표 */
+  .ov-note { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 4px;
+             padding: 12px 14px; background: #0d1117; border: 1px solid #21262d;
+             border-radius: 10px; font-size: .74rem; color: #8b949e; line-height: 1.6; }
+  .ov-note b { color: #c9d1d9; font-weight: 600; }
+  .ov-note .muted { color: #6e7681; }
+  /* 설명줄 안의 값은 카드 수치(.val-*)와 달리 본문 크기로 — 크게 뜨면 보조 지표가 주 지표처럼 보인다 */
+  .note-val-ok { color: #3fb950; font-weight: 600; }
+  .note-val-danger { color: #f85149; font-weight: 600; }
+  .score-neutral { color: #8b949e; }
+
+  /* 열린 품질 경고 */
+  .card-sub { font-size: .7rem; font-weight: 500; color: #6e7681; margin-left: 8px; }
+  .qw-table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: .74rem; }
+  .qw-table th { text-align: left; color: #6e7681; font-weight: 600; padding: 6px 10px;
+                 border-bottom: 1px solid #21262d; white-space: nowrap; }
+  .qw-table td { padding: 8px 10px; border-bottom: 1px solid #161b22; color: #c9d1d9;
+                 vertical-align: top; }
+  .qw-fp { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all;
+           color: #d29922; }
+  .qw-num { white-space: nowrap; color: #8b949e; }
+  .qw-when { white-space: nowrap; color: #6e7681; font-size: .7rem; }
+  .qw-miss { font-size: .68rem; color: #6e7681; }
+  .qw-empty { color: #6e7681; font-size: .78rem; padding: 10px 2px; }
 
   /* Filter tabs */
   .filter-bar { display: flex; gap: 4px; padding: 14px 16px 0; border-bottom: 1px solid #21262d;
@@ -816,6 +966,8 @@ html = f"""<!DOCTYPE html>
 
   {overview_html}
 
+  {quality_html}
+
   <div class="chart-card">
     <div class="chart-header">
       <span class="section-title">서버 첫 응답(TTFB) 추이<span class="section-sub">언어별 · 최근 24회 · 3회 중앙값</span></span>
@@ -837,7 +989,7 @@ html = f"""<!DOCTYPE html>
     {heatmap_svg}
   </div>
 
-  {'<div class="card"><div class="section-title">월별 요약</div><div class="monthly-grid">' + monthly_cards_html + '</div></div>' if monthly_cards_html else ''}
+  {'<div class="card"><div class="section-title">월별 요약' + monthly_note + '</div><div class="monthly-grid">' + monthly_cards_html + '</div></div>' if monthly_cards_html else ''}
 
   <div class="report-card">
     <div class="filter-bar">

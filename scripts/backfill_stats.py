@@ -7,8 +7,16 @@ gh-pages 브랜치의 각 실행 폴더 status.json을 읽어 집계 파일을 �
 
 출력 디렉터리는 첫 번째 인자로 지정(기본 /tmp).
 """
-import subprocess, json, re, tarfile, io, sys
+import subprocess, json, re, tarfile, io, os, sys
 from collections import defaultdict
+from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from dashboard_metrics import (
+    classify_run, merge_bucket, vector_invariant_errors, vector_shape_errors,
+    vector_replaced, vector_of,
+    STATS_SCHEMA_VERSION, VECTOR_KEYS, AVAILABLE, OUTAGE, INDETERMINATE,
+)
 
 CAP = 500  # update_statuses.py / update_perf.py / 워크플로우 head -N 과 동일하게 유지
 OUT = sys.argv[1] if len(sys.argv) > 1 else '/tmp'
@@ -21,10 +29,18 @@ if result.returncode != 0:
 
 tf = tarfile.open(fileobj=io.BytesIO(result.stdout))
 
-daily    = defaultdict(lambda: {'PASS': 0, 'WARN': 0, 'FAIL': 0})
-monthly  = defaultdict(lambda: {'PASS': 0, 'WARN': 0, 'FAIL': 0})
+def _empty():
+    # 서비스 분류 벡터는 항상 셋을 함께 만든다 — 부분 키 상태를 남기지 않기 위함.
+    return {'PASS': 0, 'WARN': 0, 'FAIL': 0, 'avail': 0, 'outage': 0, 'indet': 0}
+
+daily    = defaultdict(_empty)
+monthly  = defaultdict(_empty)
 statuses = {}   # "2026-04-07_18-24" -> "PASS"
 perf     = {}   # "2026-04-07_18-24" -> {"serverTimes": {...}}
+coverage = {}   # "2026-04-07_18-24" -> True/False (필드가 있는 런만)
+# 불변식 검증용 — 재구성 과정에서 실제로 본 실행 수 (UNKNOWN 포함)
+runs_daily   = defaultdict(int)
+runs_monthly = defaultdict(int)
 
 for member in tf.getmembers():
     if not member.name.endswith('/status.json'):
@@ -40,10 +56,19 @@ for member in tf.getmembers():
     except Exception:
         continue
     status = data.get('status', 'UNKNOWN')
+    date = folder[:10]
     if status in ('PASS', 'WARN', 'FAIL'):
-        date = folder[:10]
         daily[date][status]      += 1
         monthly[date[:7]][status] += 1
+    # 서비스 분류 버킷 — coverageComplete 가 없는 과거 런은 None 이라 WARN 이 확인 불가로 잡힌다.
+    cov = data.get('coverageComplete', None)
+    bkey = {AVAILABLE: 'avail', OUTAGE: 'outage', INDETERMINATE: 'indet'}[classify_run(status, cov)]
+    daily[date][bkey]       += 1
+    monthly[date[:7]][bkey] += 1
+    runs_daily[date]        += 1
+    runs_monthly[date[:7]]  += 1
+    if cov is not None:
+        coverage[folder] = cov
     statuses[folder] = status
     perf[folder] = {'serverTimes': data.get('serverTimes', {})}
 
@@ -62,19 +87,66 @@ def _load_root(name):
         return {}
 
 
-def _merge_max(existing, rebuilt):
+def _merge(existing, rebuilt):
+    """PASS/WARN/FAIL 은 항목별 max(축소 방지), 서비스 분류는 벡터 단위로 교체·보존.
+
+    벡터를 항목별 max 로 섞으면 합이 실제 실행 수를 넘는 조합이 만들어진다
+    (기존 가용 10 + 재구성 확인불가 10 → 합 20). 규칙은 dashboard_metrics.merge_bucket 하나에 둔다.
+    반환: (병합 결과, 재구성 벡터로 교체된 키 집합) — 교체된 구간만 합계 검증 대상이다.
+    """
     out = {k: dict(v) for k, v in existing.items()}
+    replaced = set()
     for k, v in rebuilt.items():
-        if k not in out:
-            out[k] = dict(v)
-        else:
-            for s in ('PASS', 'WARN', 'FAIL'):
-                out[k][s] = max(int(out[k].get(s, 0)), int(v.get(s, 0)))
-    return out
+        prev = out.get(k, {})
+        if vector_replaced(prev, v):
+            replaced.add(k)
+        out[k] = merge_bucket(prev, v)
+    return out, replaced
 
 
-daily_out   = dict(sorted(_merge_max(_load_root('daily-stats.json'), daily).items()))
-monthly_out = dict(sorted(_merge_max(_load_root('monthly-stats.json'), monthly).items()))
+daily_merged,   daily_replaced   = _merge(_load_root('daily-stats.json'), daily)
+monthly_merged, monthly_replaced = _merge(_load_root('monthly-stats.json'), monthly)
+daily_out   = dict(sorted(daily_merged.items()))
+monthly_out = dict(sorted(monthly_merged.items()))
+
+# ── 불변식 검증 ──────────────────────────────────────────────────
+# 1) 순수 재구성 결과(병합 전): 이번에 읽은 실행 폴더 수와 벡터합이 정확히 같아야 한다.
+#    분류 카운터와 실행 카운터가 한 몸으로 증가하므로 정상 코드에서는 반드시 성립한다.
+#    집계 루프를 손댔을 때 어긋남을 잡는 자리다.
+#    ※ 이 검사를 '병합 결과'에 걸면 안 된다 — prune 으로 폴더가 사라진 뒤 기존 벡터 100건을
+#      보존하고 남은 폴더 10건만 재구성한 정상 상황에서도 100 != 10 으로 실패한다.
+errors = (vector_invariant_errors(monthly, runs_monthly)
+          + vector_invariant_errors(daily, runs_daily))
+if errors:
+    print('ERROR: 재구성 벡터 불변식 위반 (avail+outage+indet ≠ 이번에 읽은 실행 수)')
+    for key, got, expected in errors[:10]:
+        print(f'  {key}: 벡터합 {got} · 기대 {expected}')
+    raise SystemExit(1)
+
+# 2) 병합 결과: 형태만 본다 — 재구성이 본 구간의 벡터가 완전한지, 음수가 섞이지 않았는지.
+#    보존 구간의 벡터는 과거 누적이라 이번 실행 수와 비교할 근거가 없다.
+shape_errors = (vector_shape_errors(monthly_out, required=runs_monthly)
+                + vector_shape_errors(daily_out, required=runs_daily))
+if shape_errors:
+    print('ERROR: 병합 결과 벡터 형태 오류 (불완전한 벡터 또는 음수)')
+    for key, reason in shape_errors[:10]:
+        print(f'  {key}: {reason}')
+    raise SystemExit(1)
+
+# 3) 재구성이 기존보다 크거나 같아 벡터를 '교체'한 구간만 병합 후에도 벡터합 == 실행 수여야 한다.
+#    (보존 구간은 대상이 아니다. 여기서 어긋나면 병합이 벡터를 통째로 옮기지 않고 섞은 것이다.)
+merged_errors = (vector_invariant_errors({k: monthly_out[k] for k in monthly_replaced}, runs_monthly)
+                 + vector_invariant_errors({k: daily_out[k] for k in daily_replaced}, runs_daily))
+if merged_errors:
+    print('ERROR: 교체 구간 벡터합 불일치 (병합이 벡터를 벡터 단위로 옮기지 않았다)')
+    for key, got, expected in merged_errors[:10]:
+        print(f'  {key}: 벡터합 {got} · 기대 {expected}')
+    raise SystemExit(1)
+
+# 재구성 범위 밖(폴더가 prune 된 과거 구간)에 벡터가 없는 항목이 남아 있으면
+# 부분 마이그레이션이다. 이 경우에도 완료로 표시하지 않는다.
+incomplete = [k for k, v in monthly_out.items() if vector_of(v) is None] \
+           + [k for k, v in daily_out.items() if vector_of(v) is None]
 
 with open(f'{OUT}/daily-stats.json', 'w') as f:
     json.dump(daily_out, f, indent=2)
@@ -84,14 +156,37 @@ with open(f'{OUT}/statuses.json', 'w') as f:
     json.dump(statuses_out, f)
 with open(f'{OUT}/perf-history.json', 'w') as f:
     json.dump(perf_out, f)
+coverage_out = {k: coverage[k] for k in recent if k in coverage}
+with open(f'{OUT}/coverage.json', 'w') as f:
+    json.dump(coverage_out, f)
+
+# 마이그레이션 완료 표시 — 대시보드는 이 표시가 있을 때만 서비스 분류 벡터를 신뢰한다.
+meta = {
+    'schemaVersion': STATS_SCHEMA_VERSION,
+    'backfillComplete': not incomplete,
+    'backfilledAt': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+    'runsSeen': sum(runs_monthly.values()),
+    'months': len(monthly_out),
+}
+if incomplete:
+    meta['incompleteKeys'] = sorted(set(incomplete))[:20]
+with open(f'{OUT}/stats-meta.json', 'w') as f:
+    json.dump(meta, f, indent=2)
 
 print(f"백필 완료 → {OUT}")
+print(f"  stats-meta.json  : schemaVersion {STATS_SCHEMA_VERSION} · "
+      f"backfillComplete {meta['backfillComplete']} · 재구성 실행 {meta['runsSeen']}건")
+if incomplete:
+    print(f"  ※ 벡터가 없는 구간 {len(set(incomplete))}건 — 부분 마이그레이션으로 표시됨 "
+          f"(대시보드는 보수적 환산으로 폴백)")
 print(f"  statuses.json   : {len(statuses_out)}건 (캡 {CAP})")
 print(f"  perf-history.json: {len(perf_out)}건")
+print(f"  coverage.json   : {len(coverage_out)}건 (완주 여부가 기록된 런만)")
 print(f"  daily-stats.json : {len(daily_out)}일치")
 print(f"  monthly-stats.json: {len(monthly_out)}개월치")
 for m_key in sorted(monthly_out.keys()):
     d = monthly_out[m_key]
-    print(f"    {m_key}  PASS {d['PASS']}  WARN {d['WARN']}  FAIL {d['FAIL']}")
+    print(f"    {m_key}  PASS {d['PASS']}  WARN {d['WARN']}  FAIL {d['FAIL']}"
+          f"   |  가용 {d.get('avail', 0)}  장애 {d.get('outage', 0)}  확인불가 {d.get('indet', 0)}")
 oldest = min(recent) if recent else '-'
 print(f"  목록 노출 윈도우 최古: {oldest}")
