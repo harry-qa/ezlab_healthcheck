@@ -9,6 +9,11 @@
  * (본체에서 export 하려면 test 함수 밖으로 빼야 하는데, 그 리팩터링은 별도 작업으로 둔다)
  */
 import { test, expect } from '@playwright/test';
+import {
+  diagnosticCardHtml,
+  makeResponseBodySnippet,
+  selectDiagnosticHeaders,
+} from './evidence';
 
 // ── ezlab.spec.ts 와 동일한 판정 규칙 ───────────────────────────────
 const AUTH_GATED: { url: RegExp; methods: string[] }[] = []; // 현재 면제 대상 없음 (실측 근거는 본체 주석)
@@ -251,6 +256,89 @@ test.describe('증거 수집 규칙', () => {
     ensure(recs, fp => `shot-${fp}.png`);
     const missing = recs.filter(r => r.severity !== 'INFO' && !r.evidencePath);
     expect(missing).toHaveLength(0);
+  });
+});
+
+test.describe('진단 카드 응답 증거', () => {
+  test('허용된 진단 헤더만 보존하고 민감·불필요 헤더는 제외', () => {
+    const selected = selectDiagnosticHeaders({
+      'Content-Type': 'application/xml',
+      Server: 'AmazonS3',
+      'X-Cache': 'Error from cloudfront',
+      'X-Amz-Cf-Pop': 'ICN53-P1',
+      'Set-Cookie': 'secret=value',
+      Authorization: 'Bearer secret',
+    });
+    expect(selected).toEqual({
+      'content-type': 'application/xml',
+      server: 'AmazonS3',
+      'x-cache': 'Error from cloudfront',
+      'x-amz-cf-pop': 'ICN53-P1',
+    });
+    expect(JSON.stringify(selected)).not.toContain('secret');
+  });
+
+  test('XML 오류 본문을 짧게 남기고 이미지 바이너리는 제외', () => {
+    const xml = Buffer.from('<?xml version="1.0"?><Error><Code>AccessDenied</Code><RequestId>REQ-123</RequestId></Error>');
+    expect(makeResponseBodySnippet(xml, 'application/xml', 403)).toContain('AccessDenied');
+    expect(makeResponseBodySnippet(Buffer.from([0x89, 0x50, 0x4e, 0x47]), 'image/png', 403)).toBeUndefined();
+  });
+
+  test('긴 텍스트 본문은 카드 크기를 제한하도록 잘라낸다', () => {
+    const snippet = makeResponseBodySnippet(Buffer.from(`<html>${'x'.repeat(1000)}</html>`), 'text/html', 200, 80);
+    expect(snippet?.endsWith('…')).toBe(true);
+    expect(snippet!.length).toBeLessThanOrEqual(81);
+  });
+
+  test('이미지 403 카드에 참조 페이지·응답 헤더·본문을 모두 표시', () => {
+    const html = diagnosticCardHtml({
+      step: 'STEP6·이미지', type: '이미지', lang: 'ko,en,jp,tw',
+      url: 'https://cdn.ezlab.im/assets/images/home/og_image_01.png', status: 403,
+      responseTime: 0, symptom: '이미지 로드 실패', timestamp: '2026. 8. 2.', severity: 'WARN',
+      contentType: 'application/xml', responseBodyBytes: 263,
+      responseHeaders: { server: 'AmazonS3', 'x-cache': 'Error from cloudfront' },
+      responseBodySnippet: '<Error><Code>AccessDenied</Code></Error>',
+      referencePages: ['https://ezlab.im/ko', 'https://ezlab.im/en'],
+    }, 'run-1');
+    expect(html).toContain('참조 페이지');
+    expect(html).toContain('https://ezlab.im/ko');
+    expect(html).toContain('application/xml');
+    expect(html).toContain('server: AmazonS3');
+    expect(html).toContain('AccessDenied');
+    expect(html).toContain('263 bytes');
+  });
+
+  test('간헐 종합 카드에 실제 회복 URL과 원인을 표시', () => {
+    const html = diagnosticCardHtml({
+      step: '간헐·종합', type: '간헐', lang: '-', url: 'https://ezlab.im', status: 200,
+      responseTime: 0, symptom: '재시도 회복 2건', timestamp: '2026. 8. 2.', severity: 'WARN',
+      diagnosticDetails: [
+        '[1] STEP4·다운로드 · en\nhttps://ezlab.im/en/tool/ezdown\n1회차 타임아웃 후 회복',
+        '[2] STEP3·크롤 · tw\nhttps://ezlab.im/tool/ezzip\n2회차 회복',
+      ],
+    }, 'run-2');
+    expect(html).toContain('https://ezlab.im/en/tool/ezdown');
+    expect(html).toContain('1회차 타임아웃 후 회복');
+    expect(html).toContain('https://ezlab.im/tool/ezzip');
+  });
+
+  test('응답 증거가 없는 카드에는 빈 선택 행을 만들지 않는다', () => {
+    const html = diagnosticCardHtml({
+      step: 'STEP9·인증서', type: '인증서', lang: '-', url: 'https://ezlab.im', status: 0,
+      responseTime: 0, symptom: '연결 실패', timestamp: '2026. 8. 2.', severity: 'WARN',
+    }, 'run-3');
+    expect(html).not.toContain('Content-Type</td>');
+    expect(html).not.toContain('응답 본문 발췌</td>');
+  });
+
+  test('진단 카드에 들어가는 응답 본문은 HTML 이스케이프', () => {
+    const html = diagnosticCardHtml({
+      step: 'STEP6·이미지', type: '이미지', lang: 'ko', url: 'https://cdn.ezlab.im/a.png', status: 403,
+      responseTime: 0, symptom: '실패', timestamp: '2026. 8. 2.', severity: 'WARN',
+      responseBodySnippet: '<script>alert("x")</script>',
+    }, 'run-4');
+    expect(html).toContain('&lt;script&gt;');
+    expect(html).not.toContain('<script>alert');
   });
 });
 
