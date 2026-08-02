@@ -591,16 +591,21 @@ for midx, month in enumerate(sorted_months_list):
             eid = entry.replace('_', '-')
 
             # Detail panel content
-            perf_rows = ''
+            perf_cards = ''
             for lang in LANGS:
                 ms = perf.get(lang, 0)
                 if ms <= 0:
                     continue
-                slow_td = ' class="dt-slow"' if ms >= THRESHOLD else ''
-                perf_rows += (
-                    f'<tr><td class="dt-lang">{lang.upper()}</td>'
-                    f'<td{slow_td}>{ms}ms</td>'
-                    f'<td class="dt-status">{"🔴 위험" if ms >= THRESHOLD else "🟢 정상"}</td></tr>'
+                perf_state = '위험 구간' if ms >= THRESHOLD else '정상 범위'
+                perf_state_cls = ' dt-state-danger' if ms >= THRESHOLD else ''
+                perf_value_cls = ' dt-value-danger' if ms >= THRESHOLD else ''
+                perf_cards += (
+                    f'<div class="perf-detail-card">'
+                    f'<div class="dt-card-head"><span class="lang-dot" style="background:{LANG_COLORS[lang]}"></span>'
+                    f'<span class="dt-lang">{LANG_LABELS[lang]}</span><span class="dt-code">{lang.upper()}</span></div>'
+                    f'<div class="dt-value{perf_value_cls}">{ms}<span>ms</span></div>'
+                    f'<div class="dt-state{perf_state_cls}">{perf_state}</div>'
+                    f'</div>'
                 )
 
             curl_rows = ''
@@ -621,10 +626,10 @@ for midx, month in enumerate(sorted_months_list):
 
             perf_section = (
                 f'<div class="dp-section">'
-                f'<div class="dp-title">서버 첫 응답 시간 (TTFB · 3회 중앙값)</div>'
-                f'<table class="perf-tbl"><tbody>{perf_rows}</tbody></table>'
+                f'<div class="dp-title">서버 첫 응답 시간 <span class="dp-sub">TTFB · 3회 중앙값</span></div>'
+                f'<div class="perf-detail-grid">{perf_cards}</div>'
                 f'</div>'
-            ) if perf_rows else ''
+            ) if perf_cards else ''
 
             # 장애 상세 섹션
             run_failures = failures_history.get(entry, [])
@@ -656,19 +661,33 @@ for midx, month in enumerate(sorted_months_list):
                     f_lang   = escape(str(fr.get('lang', '-')))
                     status_cls = 'fs-5xx' if f_status >= 500 else ('fs-4xx' if f_status >= 400 else 'fs-other')
                     status_txt = str(f_status) if f_status > 0 else 'timeout'
+                    status_label = f'HTTP {status_txt}' if f_status > 0 else '응답 없음'
                     time_txt   = f'{f_time}ms' if f_time > 0 else '—'
                     if is_info:
                         f_sym += ' <span class="fd-info-tag">스코어 미반영</span>'
+                    # 구버전 기록에는 severity가 없고 당시 failures-history는 FAIL만 저장했다.
+                    # 이를 WARN으로 보이면 과거 장애 의미가 바뀌므로 미기록(None)은 FAIL로 호환한다.
+                    is_fail = sev == 'FAIL' or sev is None
+                    severity_txt = '참고' if is_info else ('장애' if is_fail else '경고')
+                    severity_cls = ' fd-severity-info' if is_info else (' fd-severity-fail' if is_fail else ' fd-severity-warn')
+                    url_html = (
+                        f'<a class="fd-url" href="{f_url}" target="_blank" rel="noopener">{f_url}</a>'
+                        if str(fr.get('url', '')).startswith(('http://', 'https://'))
+                        else f'<span class="fd-url">{f_url}</span>'
+                    )
                     f_rows += (
-                        f'<tr class="{"fd-row-info" if is_info else ""}">'
-                        f'<td class="fd-icon">{icon}</td>'
-                        f'<td class="fd-step">{f_step}</td>'
-                        f'<td class="fd-lang">{f_lang}</td>'
-                        f'<td class="fd-url" title="{f_url}">{f_url}</td>'
-                        f'<td class="fd-status {status_cls}">{status_txt}</td>'
-                        f'<td class="fd-time">{time_txt}</td>'
-                        f'<td class="fd-sym">{f_sym}</td>'
-                        f'</tr>'
+                        f'<article class="fd-item{" fd-item-info" if is_info else ""}">'
+                        f'<div class="fd-item-head">'
+                        f'<span class="fd-icon">{icon}</span>'
+                        f'<span class="fd-severity{severity_cls}">{severity_txt}</span>'
+                        f'<span class="fd-step">{f_step}</span>'
+                        f'<span class="fd-lang">{f_lang}</span>'
+                        f'<span class="fd-response"><b class="fd-status {status_cls}">{status_label}</b>'
+                        f'<span class="fd-time">{time_txt}</span></span>'
+                        f'</div>'
+                        f'{url_html}'
+                        f'<div class="fd-sym">{f_sym}</div>'
+                        f'</article>'
                     )
                 scored_n = len(run_failures) - info_n
                 # 전건이 INFO면 런은 PASS인데 제목이 '장애 상세'라 초록 런에 빨간 헤더가 붙는다 → 제목·색을 등급에 맞춘다.
@@ -680,9 +699,7 @@ for midx, month in enumerate(sorted_months_list):
                 failure_section = (
                     f'<div class="dp-section dp-failure{"" if scored_n else " dp-failure-info"}">'
                     f'<div class="dp-title {title_cls}">{title_txt} <span class="dp-sub">{count_txt}</span></div>'
-                    f'<div class="fd-scroll">'
-                    f'<table class="fd-table"><tbody>{f_rows}</tbody></table>'
-                    f'</div>'
+                    f'<div class="fd-list">{f_rows}</div>'
                     f'</div>'
                 )
 
@@ -698,13 +715,17 @@ for midx, month in enumerate(sorted_months_list):
                 f'<tr class="run-detail hidden" id="detail-{eid}">'
                 f'<td colspan="4">'
                 f'<div class="detail-panel">'
+                f'<div class="detail-head">'
+                f'<div><span class="detail-kicker">실행 상세</span>'
+                f'<strong>{date_short} {time_display} KST</strong></div>'
+                f'<a href="{entry}/" target="_blank" class="detail-report-btn">Playwright 리포트 열기 <span>↗</span></a>'
+                f'</div>'
                 f'{failure_section}'
                 f'{perf_section}'
-                f'<div class="dp-section">'
-                f'<div class="dp-title">cURL 명령어 <span class="dp-sub">로컬에서 바로 테스트</span></div>'
-                f'{curl_rows}'
-                f'</div>'
-                f'<a href="{entry}/" target="_blank" class="detail-report-btn">📋 상세 Playwright 리포트 열기</a>'
+                f'<details class="dp-tools">'
+                f'<summary>cURL 재현 명령어 <span>로컬에서 응답 시간을 다시 확인할 때 사용</span></summary>'
+                f'<div class="curl-list">{curl_rows}</div>'
+                f'</details>'
                 f'</div>'
                 f'</td></tr>\n'
             )
@@ -718,7 +739,7 @@ css = """
   a:hover { text-decoration: underline; }
 
   /* Layout */
-  .container { max-width: 760px; margin: 0 auto; padding: 32px 20px 60px; }
+  .container { max-width: 1120px; margin: 0 auto; padding: 32px 20px 60px; }
 
   /* Header */
   .header { margin-bottom: 28px; }
@@ -910,7 +931,7 @@ css = """
 
   /* Report table */
   .report-card { background: #161b22; border: 1px solid #21262d; border-radius: 10px;
-                 overflow: hidden; margin-bottom: 18px; }
+                 overflow: hidden; margin-bottom: 18px; width: 100%; }
   table { width: 100%; border-collapse: collapse; }
   td { border-bottom: 1px solid #21262d; font-size: .85rem; vertical-align: middle; }
   tr:last-child td { border-bottom: none; }
@@ -950,26 +971,49 @@ css = """
 
   /* Detail panel */
   .run-detail td { padding: 0; border-top: none; }
-  .detail-panel { padding: 14px 16px 16px 44px; background: #0d1117;
+  .detail-panel { padding: 22px 24px 24px; background: #0d1117;
                   border-top: 1px solid #21262d; animation: fadeSlide .2s ease; }
   @keyframes fadeSlide {
     from { opacity: 0; transform: translateY(-6px); }
     to   { opacity: 1; transform: translateY(0); }
   }
-  .dp-section { margin-bottom: 14px; }
-  .dp-title { font-size: .72rem; font-weight: 700; color: #8b949e;
-              text-transform: uppercase; letter-spacing: .05em; margin-bottom: 8px; }
+  .detail-head { display: flex; align-items: center; justify-content: space-between; gap: 16px;
+                 margin-bottom: 22px; padding-bottom: 16px; border-bottom: 1px solid #21262d; }
+  .detail-head > div { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+  .detail-kicker { color: #6e7681; font-size: .65rem; font-weight: 800; letter-spacing: .08em;
+                   text-transform: uppercase; }
+  .detail-head strong { color: #e6edf3; font-size: .9rem; font-variant-numeric: tabular-nums; }
+  .dp-section { margin-bottom: 22px; }
+  .dp-title { font-size: .75rem; font-weight: 750; color: #8b949e;
+              text-transform: uppercase; letter-spacing: .055em; margin-bottom: 11px; }
   .dp-sub { font-weight: 400; text-transform: none; letter-spacing: 0; color: #484f58; }
 
-  /* Perf detail table */
-  .perf-tbl { border-collapse: collapse; font-size: .8rem; margin-bottom: 4px; }
-  .perf-tbl td { border: none; padding: 2px 14px 2px 0; color: #8b949e; border-bottom: none; }
-  .dt-lang { font-weight: 700; color: #58a6ff !important; width: 40px; padding-left: 0 !important; }
-  .dt-slow { color: #f85149 !important; font-weight: 700; }
-  .dt-status { color: #484f58; font-size: .72rem; }
+  /* Perf detail cards */
+  .perf-detail-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+  .perf-detail-card { min-width: 0; padding: 12px 14px; border: 1px solid #21262d;
+                      border-radius: 8px; background: #11161e; }
+  .dt-card-head { display: flex; align-items: center; gap: 7px; color: #8b949e; }
+  .dt-card-head .lang-dot { width: 7px; height: 7px; border-radius: 50%; flex: 0 0 auto; }
+  .dt-lang { min-width: 0; overflow: hidden; color: #c9d1d9; font-size: .72rem; font-weight: 700;
+             text-overflow: ellipsis; white-space: nowrap; }
+  .dt-code { margin-left: auto; color: #484f58; font-size: .6rem; font-weight: 800; }
+  .dt-value { margin-top: 9px; color: #e6edf3; font-size: 1.25rem; font-weight: 800;
+              font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+  .dt-value span { margin-left: 2px; color: #6e7681; font-size: .67rem; font-weight: 600; }
+  .dt-value-danger { color: #ff7b72; }
+  .dt-state { margin-top: 2px; color: #3fb950; font-size: .65rem; font-weight: 650; }
+  .dt-state-danger { color: #f85149; }
 
   /* cURL rows */
-  .curl-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+  .dp-tools { margin-top: 4px; border: 1px solid #21262d; border-radius: 8px; background: #11161e; }
+  .dp-tools summary { display: flex; align-items: center; gap: 8px; padding: 11px 13px; color: #8b949e;
+                      font-size: .73rem; font-weight: 700; cursor: pointer; user-select: none; }
+  .dp-tools summary::marker { color: #484f58; }
+  .dp-tools summary span { color: #484f58; font-size: .67rem; font-weight: 400; }
+  .dp-tools[open] summary { border-bottom: 1px solid #21262d; color: #c9d1d9; }
+  .curl-list { padding: 12px; }
+  .curl-row { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; flex-wrap: nowrap; }
+  .curl-row:last-child { margin-bottom: 0; }
   .curl-lang { font-size: .68rem; font-weight: 700; color: #58a6ff; width: 28px;
                flex-shrink: 0; text-align: center; }
   .curl-code { flex: 1; font-family: 'SF Mono', 'Fira Code', Consolas, monospace;
@@ -985,35 +1029,44 @@ css = """
   .curl-ms.curl-time-slow { color: #f85149; font-weight: 700; }
 
   /* Failure detail table */
-  .dp-failure { border-left: 2px solid #f85149; padding-left: 10px; }
+  .dp-failure { padding-left: 0; }
   /* 전건이 INFO(스코어 미반영)인 런은 빨간 강조를 걷어낸다 — 런 자체는 PASS다 */
-  .dp-failure-info { border-left-color: #484f58; }
   .dp-title-fail { color: #f85149 !important; }
   .dp-title-info { color: #8b949e !important; }
-  .fd-row-info td { opacity: .62; }
+  .fd-list { display: grid; gap: 9px; }
+  .fd-item { min-width: 0; padding: 13px 14px 14px; border: 1px solid #30363d;
+             border-left: 3px solid #d29922; border-radius: 8px; background: #11161e; }
+  .fd-item-info { opacity: .72; border-left-color: #484f58; }
+  .fd-item-head { display: flex; align-items: center; gap: 8px; min-width: 0; margin-bottom: 9px; }
+  .fd-icon { flex: 0 0 auto; font-size: .9rem; }
+  .fd-severity { flex: 0 0 auto; padding: 2px 7px; border-radius: 999px; font-size: .61rem;
+                 font-weight: 800; letter-spacing: .02em; }
+  .fd-severity-fail { background: #2d0f0f; color: #ff7b72; }
+  .fd-severity-warn { background: #2d2008; color: #e3b341; }
+  .fd-severity-info { background: #21262d; color: #8b949e; }
   .fd-info-tag { display: inline-block; margin-left: 6px; padding: 0 5px; border-radius: 3px;
                  background: #21262d; color: #8b949e; font-size: .62rem; font-weight: 700;
                  vertical-align: middle; white-space: nowrap; }
-  .fd-scroll { overflow-x: auto; }
-  .fd-table { border-collapse: collapse; font-size: .75rem; width: 100%; min-width: 520px; }
-  .fd-table tbody tr { border-bottom: 1px solid #1c2333; }
-  .fd-table tbody tr:last-child { border-bottom: none; }
-  .fd-table td { padding: 5px 8px; color: #8b949e; vertical-align: top; border-bottom: none; }
-  .fd-icon  { width: 20px; font-size: .85rem; padding-left: 0 !important; }
-  .fd-step  { color: #484f58; font-size: .68rem; white-space: nowrap; }
-  .fd-lang  { color: #58a6ff; font-weight: 700; font-size: .68rem; width: 30px; }
-  .fd-url   { color: #c9d1d9; font-family: 'SF Mono', Consolas, monospace; font-size: .7rem;
-              max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .fd-step { min-width: 0; overflow: hidden; color: #8b949e; font-size: .68rem; font-weight: 650;
+             text-overflow: ellipsis; white-space: nowrap; }
+  .fd-lang { flex: 0 0 auto; padding: 2px 6px; border-radius: 4px; background: #0d1117;
+             color: #58a6ff; font-size: .62rem; font-weight: 750; }
+  .fd-response { display: flex; align-items: center; gap: 9px; margin-left: auto; white-space: nowrap; }
+  .fd-url { display: block; width: fit-content; max-width: 100%; color: #c9d1d9;
+            font-family: 'SF Mono', Consolas, monospace; font-size: .72rem; line-height: 1.45;
+            overflow-wrap: anywhere; word-break: break-word; }
+  a.fd-url:hover { color: #58a6ff; text-decoration: underline; text-underline-offset: 2px; }
   .fd-status { font-weight: 700; font-size: .72rem; white-space: nowrap; }
   .fs-5xx   { color: #f85149; }
   .fs-4xx   { color: #d29922; }
   .fs-other { color: #8b949e; }
   .fd-time  { color: #484f58; font-size: .68rem; white-space: nowrap; }
-  .fd-sym   { color: #8b949e; font-size: .72rem; }
+  .fd-sym { margin-top: 7px; padding-top: 8px; border-top: 1px solid #21262d; color: #8b949e;
+            font-size: .73rem; line-height: 1.5; }
 
-  .detail-report-btn { display: inline-block; margin-top: 4px; font-size: .75rem;
+  .detail-report-btn { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; font-size: .72rem;
                        color: #58a6ff; border: 1px solid #21262d; border-radius: 6px;
-                       padding: 5px 12px; background: #161b22; transition: background .15s; }
+                       padding: 6px 10px; background: #161b22; transition: background .15s; }
   .detail-report-btn:hover { background: #21262d; text-decoration: none; }
 
   /* Status badges */
@@ -1044,6 +1097,11 @@ css = """
   .cert-fill { position: absolute; left: 0; top: 0; height: 100%; border-radius: 5px; }
   .cert-scale { display: flex; justify-content: space-between; font-size: .66rem; color: #484f58; margin-top: 5px; }
 
+  @media (max-width: 900px) {
+    .perf-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .detail-panel { padding: 20px; }
+  }
+
   @media (max-width: 540px) {
     .status-hero { flex-direction: column; align-items: flex-start; gap: 12px; padding: 18px; }
     .status-aside { width: 100%; flex-direction: row; align-items: center; justify-content: space-between; }
@@ -1056,6 +1114,26 @@ css = """
     .spark-grid { grid-template-columns: repeat(2, 1fr); }
     .perf-summary { display: none; }
     .cert-grid { grid-template-columns: 1fr; }
+    .report-card { border-radius: 8px; }
+    .filter-bar { padding-left: 8px; padding-right: 8px; }
+    .tab-btn { padding-left: 8px; padding-right: 8px; font-size: .72rem; }
+    .run-time { padding-left: 18px !important; }
+    .detail-panel { padding: 16px 14px 18px; }
+    .detail-head { align-items: flex-start; margin-bottom: 18px; }
+    .detail-head > div { flex-direction: column; align-items: flex-start; gap: 3px; }
+    .detail-head strong { font-size: .8rem; }
+    .detail-report-btn { padding: 5px 8px; font-size: .67rem; }
+    .perf-detail-grid { grid-template-columns: 1fr 1fr; gap: 7px; }
+    .perf-detail-card { padding: 10px 11px; }
+    .fd-item { padding: 11px 11px 12px; }
+    .fd-item-head { flex-wrap: wrap; }
+    .fd-step { max-width: calc(100% - 150px); }
+    .fd-response { width: 100%; margin-left: 26px; justify-content: flex-start; }
+    .dp-tools summary { align-items: flex-start; flex-direction: column; gap: 2px; }
+    .curl-row { flex-wrap: wrap; }
+    .curl-code { order: 2; flex-basis: calc(100% - 66px); }
+    .curl-copy { order: 3; }
+    .curl-ms { margin-left: auto; }
   }
 """
 
