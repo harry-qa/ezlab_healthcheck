@@ -14,6 +14,11 @@ import {
   makeResponseBodySnippet,
   selectDiagnosticHeaders,
 } from './evidence';
+import {
+  LOCATOR_ATTRIBUTE_TIMEOUT_MS,
+  attributeReadFailureImpact,
+  readLocatorAttribute,
+} from './locator-guard';
 
 // ── ezlab.spec.ts 와 동일한 판정 규칙 ───────────────────────────────
 const AUTH_GATED: { url: RegExp; methods: string[] }[] = []; // 현재 면제 대상 없음 (실측 근거는 본체 주석)
@@ -342,6 +347,58 @@ test.describe('진단 카드 응답 증거', () => {
   });
 });
 
+test.describe('locator 속성 읽기 제한', () => {
+  test('운영 기본 제한 2초를 실제 getAttribute 호출에 전달', async () => {
+    let receivedName = '';
+    let receivedTimeout = 0;
+    const result = await readLocatorAttribute({
+      async getAttribute(name, options) {
+        receivedName = name;
+        receivedTimeout = options?.timeout ?? 0;
+        return '/assets/logo.png';
+      },
+    }, 'src');
+    expect(result).toEqual({ ok: true, value: '/assets/logo.png' });
+    expect(receivedName).toBe('src');
+    expect(receivedTimeout).toBe(LOCATOR_ATTRIBUTE_TIMEOUT_MS);
+  });
+
+  test('locator 자체 timeout은 예외를 밖으로 던지지 않고 타임아웃으로 분류', async () => {
+    const result = await readLocatorAttribute({
+      async getAttribute() { throw new Error('locator.getAttribute: Timeout 2000ms exceeded.'); },
+    }, 'src');
+    expect(result.ok).toBe(false);
+    if (result.ok === false) {
+      expect(result.timedOut).toBe(true);
+      expect(result.error).toContain('Timeout 2000ms');
+    }
+  });
+
+  test('실제 CI에서 발생한 test timeout 문구도 타임아웃으로 분류', async () => {
+    const result = await readLocatorAttribute({
+      async getAttribute() { throw new Error('locator.getAttribute: Test timeout of 600000ms exceeded.'); },
+    }, 'src');
+    expect(result.ok).toBe(false);
+    if (result.ok === false) expect(result.timedOut).toBe(true);
+  });
+
+  test('요소 detach 같은 비타임아웃 오류는 별도 분류', async () => {
+    const result = await readLocatorAttribute({
+      async getAttribute() { throw new Error('Element is not attached to the DOM'); },
+    }, 'src');
+    expect(result.ok).toBe(false);
+    if (result.ok === false) expect(result.timedOut).toBe(false);
+  });
+
+  test('타임아웃이면 현재 요소부터 남은 DOM 이미지 전체를 미검증으로 계산하고 순회를 중단', () => {
+    expect(attributeReadFailureImpact(116, 17, true)).toEqual({ unverified: 99, stop: true });
+  });
+
+  test('비타임아웃 오류면 해당 요소 하나만 미검증으로 계산하고 순회를 계속', () => {
+    expect(attributeReadFailureImpact(116, 17, false)).toEqual({ unverified: 1, stop: false });
+  });
+});
+
 // ── 점검 완주(coverageComplete) 판정 ───────────────────────────────
 // 본체는 truncatedSteps 가 비어 있을 때만 coverageComplete=true 로 내린다.
 // 크롤 중단(crawlTruncated)은 예전에 WARN 기록만 남기고 truncatedSteps 에 들어가지 않아,
@@ -408,6 +465,12 @@ test.describe('점검 완주 판정', () => {
     const c = coverage(['STEP3·크롤', 'STEP7·로그인', 'STEP8·이지다운', 'STEP9·인증서']);
     expect(c.coverageComplete).toBe(false);
     expect(c.skippedSteps).toHaveLength(4);
+  });
+
+  test('DOM 이미지 locator 타임아웃은 이미지 커버리지 미완주로 남긴다', () => {
+    const c = coverage(['STEP5·이미지DOM수집']);
+    expect(c.coverageComplete).toBe(false);
+    expect(c.skippedSteps).toContain('STEP5·이미지DOM수집');
   });
 });
 
