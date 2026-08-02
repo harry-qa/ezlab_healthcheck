@@ -10,6 +10,11 @@ import {
   selectDiagnosticHeaders,
   type DiagnosticRecord,
 } from './evidence';
+import {
+  LOCATOR_ATTRIBUTE_TIMEOUT_MS,
+  attributeReadFailureImpact,
+  readLocatorAttribute,
+} from './locator-guard';
 
 const SCREENSHOT_DIR = 'test-results/screenshots';
 fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
@@ -361,9 +366,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   // 검사들이 예산 가드에 걸려 통째로 스킵되고 coverageComplete=false 가 된다. 510~600s 구간은
   // 증거 생성·리포트 저장 여유로 남긴다.
   //
-  // 한계(중요): 이 게이트가 통제하는 것은 '재시도 경로'뿐이다. 최초 요청·locator 호출·스크린샷·
-  // 증거 생성 같은 다른 await는 통제하지 못하며, 그중 하나가 멈추면 전체 타임아웃까지 끌려가
-  // 리포트·증거 저장이 실패할 수 있다(실제로 CI에서 getAttribute()가 그렇게 멈춘 적이 있다).
+  // 한계(중요): 이 게이트가 통제하는 것은 '재시도 경로'뿐이다. 최초 요청·스크린샷·증거 생성 같은
+  // 다른 await는 통제하지 못하며, 그중 하나가 멈추면 전체 타임아웃까지 끌려가 리포트·증거 저장이
+  // 실패할 수 있다. DOM 이미지 getAttribute()는 별도 2초 제한으로 방어하지만 모든 await가 그런 것은 아니다.
   // 즉 이 게이트는 '리포트 저장 보장'이 아니라 '재시도가 510s 이후까지 이어지지 않게 하는' 제한이다.
   const retryBudgetOk = (backoffMs: number, requestTimeoutMs: number) =>
     Date.now() - testStartTime + backoffMs + requestTimeoutMs <= REPORT_SAFETY_MS;
@@ -1498,9 +1503,29 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
           // 3층: DOM <img src> — 네트워크로 요청되지 않은 지연 로딩 이미지 보완.
           const images = await page.locator('img').all();
           console.log(`[INFO][${lang}] DOM 이미지 ${images.length}개 · 메타 이미지 ${metaImgs.length}개 · 네트워크 실패 ${netFailures.length}건`);
-          for (const img of images) {
+          const domReadErrors: string[] = [];
+          let domReadFailureCount = 0;
+          let domImagesUnverified = 0;
+          for (let imageIndex = 0; imageIndex < images.length; imageIndex++) {
             if (budgetHit('STEP5·이미지검증')) break;
-            const src = await img.getAttribute('src');
+            const img = images[imageIndex];
+            const srcRead = await readLocatorAttribute(img, 'src');
+            if (srcRead.ok === false) {
+              domReadFailureCount++;
+              const impact = attributeReadFailureImpact(images.length, imageIndex, srcRead.timedOut);
+              domImagesUnverified += impact.unverified;
+              if (domReadErrors.length < 10) {
+                domReadErrors.push(
+                  `이미지 ${imageIndex + 1}/${images.length} · ${srcRead.timedOut ? '타임아웃' : '읽기 오류'} · ${srcRead.error}`,
+                );
+              }
+              // 브라우저 채널이 응답하지 않는 상태에서 나머지 locator를 계속 읽으면
+              // 이미지 수 × timeout 만큼 다시 지연된다. 이 언어의 DOM 이미지 검증만 중단하고
+              // 다음 언어·후속 STEP으로 넘어간다. 비타임아웃(요소 detach 등)은 해당 요소만 건너뛴다.
+              if (impact.stop) break;
+              continue;
+            }
+            const src = srcRead.value;
             if (!src || src.startsWith('data:') || src.startsWith('blob:')) continue;
             const { fetchUrl, displayUrl } = normalizeImageUrl(src, baseUrl);
             const o = obsOf(displayUrl);
@@ -1517,6 +1542,18 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
                   responseTime: 0, symptom: '', timestamp: kstNow(), severity: 'WARN' },
                 img, `경고_깨진이미지_${lang}`);
             }
+          }
+          if (domReadErrors.length > 0) {
+            warnCount++;
+            truncatedSteps.add('STEP5·이미지DOM수집');
+            const ts = kstNow();
+            const symptom = `DOM 이미지 속성 읽기 실패 ${domReadFailureCount}건 — 미검증 ${domImagesUnverified}/${images.length}개 (호출 제한 ${LOCATOR_ATTRIBUTE_TIMEOUT_MS}ms)`;
+            console.log(`[WARN][콘텐츠][${lang}] ${symptom} ${targetUrl} @ ${ts}`);
+            await recordIssue({
+              step: 'STEP5·이미지검증', type: '이미지', lang, url: targetUrl, status: 0,
+              responseTime: 0, symptom, timestamp: ts, severity: 'WARN',
+              diagnosticDetails: domReadErrors,
+            });
           }
         } catch (e) {
           failCount++;
@@ -1805,8 +1842,25 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
 
           // 3) 깨진 이미지 — DOM(lazy-load) 대신 URL fetch 상태로 판별
           const imgs = await page.locator('img').all();
-          for (const img of imgs) {
-            const src = await img.getAttribute('src');
+          const domReadErrors: string[] = [];
+          let domReadFailureCount = 0;
+          let domImagesUnverified = 0;
+          for (let imageIndex = 0; imageIndex < imgs.length; imageIndex++) {
+            const img = imgs[imageIndex];
+            const srcRead = await readLocatorAttribute(img, 'src');
+            if (srcRead.ok === false) {
+              domReadFailureCount++;
+              const impact = attributeReadFailureImpact(imgs.length, imageIndex, srcRead.timedOut);
+              domImagesUnverified += impact.unverified;
+              if (domReadErrors.length < 10) {
+                domReadErrors.push(
+                  `이미지 ${imageIndex + 1}/${imgs.length} · ${srcRead.timedOut ? '타임아웃' : '읽기 오류'} · ${srcRead.error}`,
+                );
+              }
+              if (impact.stop) break;
+              continue;
+            }
+            const src = srcRead.value;
             if (!src || src.startsWith('data:') || src.startsWith('blob:')) continue;
             // STEP 6과 동일한 정규화 사용 — 현재 ezdown은 일반 경로만 쓰지만, Next.js 이미지로
             // 바뀌는 순간 STEP 6이 겪었던 '전량 스킵' 구멍이 여기서 재발하지 않도록 미리 통일한다.
@@ -1842,6 +1896,18 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
               console.log(`[WARN][이지다운][이미지][${lang}] ${st === 0 ? '접근 불가' : st} ${displayUrl}`);
               await recordIssue({ step: 'STEP8·이지다운이미지', type: '이미지', lang, url: displayUrl, status: st, responseTime: 0, symptom, timestamp: ts, severity: 'WARN', retrySkipped: imgRetrySkipped }, { visual: true, locator: img, label: `경고_이지다운깨진이미지_${lang}` });
             }
+          }
+          if (domReadErrors.length > 0) {
+            warnCount++;
+            truncatedSteps.add('STEP8·이미지DOM수집');
+            const ts = kstNow();
+            const symptom = `DOM 이미지 속성 읽기 실패 ${domReadFailureCount}건 — 미검증 ${domImagesUnverified}/${imgs.length}개 (호출 제한 ${LOCATOR_ATTRIBUTE_TIMEOUT_MS}ms)`;
+            console.log(`[WARN][이지다운][이미지][${lang}] ${symptom} ${url} @ ${ts}`);
+            await recordIssue({
+              step: 'STEP8·이지다운이미지', type: '이미지', lang, url, status: 0,
+              responseTime: 0, symptom, timestamp: ts, severity: 'WARN',
+              diagnosticDetails: domReadErrors,
+            });
           }
         } catch (e) {
           // 진입 실패(404/타임아웃)는 위 gotoWithRetry가 status로 처리하므로,
