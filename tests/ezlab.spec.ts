@@ -225,8 +225,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
 
   // ── 언어별 핵심 콘텐츠 키워드 ───────────────────────────────────
   // 실제 페이지 기준으로 확인된 키워드만 사용
+  // 사이트 표기는 '이지캡처'(처)다 — '캡쳐'로 두면 매 런 ko 콘텐츠가 누락 키워드로 오탐 FAIL 난다.
   const contentKeywords: Record<string, string[]> = {
-    ko: ['다운로드', '이지캡쳐', '이지집'],
+    ko: ['다운로드', '이지캡처', '이지집'],
     en: ['download', 'ezcapture', 'ezzip'],
     jp: ['ダウンロード', 'ezcapture', 'ezzip'],  // toLowerCase() 비교 기준으로 소문자 통일
     tw: ['下載', 'ezcapture', 'ezzip'],
