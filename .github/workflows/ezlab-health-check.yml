@@ -41,7 +41,7 @@ jobs:
 
       # 타입 오류를 30분짜리 런타임이 아니라 여기서 즉시 잡는다 (브라우저 설치·테스트 전 빠른 실패)
       - name: 타입 체크 (tsc --noEmit)
-        run: npx tsc --noEmit
+        run: npm run typecheck
 
       - name: Playwright 브라우저 설치 (Chromium)
         run: npx playwright install --with-deps chromium
@@ -50,12 +50,12 @@ jobs:
       # 여기서 실패하면 헬스체크 결과를 신뢰할 수 없으므로 continue-on-error 없이 즉시 중단한다.
       - name: 판정 규칙 테스트 (운영 무관)
         run: |
-          npx playwright test tests/judgment.spec.ts
-          python3 scripts/test_fail_streak.py
-          python3 scripts/test_dashboard_metrics.py
+          npm run judge
+          npm run streak
+          npm run metrics
 
       - name: 테스트 실행
-        run: npx playwright test tests/ezlab.spec.ts
+        run: npm run health
         continue-on-error: true
 
       - name: 실행별 리포트 저장 및 인덱스 생성

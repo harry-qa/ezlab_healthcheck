@@ -1,12 +1,18 @@
 {
-  "name": "autoqa",
+  "name": "ezlab-healthcheck",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {},
+  "private": true,
+  "description": "이지랩 전체 서비스를 30분 주기로 점검하는 Playwright 헬스체크 자동화",
+  "scripts": {
+    "health": "playwright test tests/ezlab.spec.ts",
+    "judge": "playwright test tests/judgment.spec.ts",
+    "metrics": "python3 scripts/test_dashboard_metrics.py",
+    "streak": "python3 scripts/test_fail_streak.py",
+    "typecheck": "tsc --noEmit"
+  },
   "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "author": "Subin Lee",
+  "license": "UNLICENSED",
   "type": "commonjs",
   "devDependencies": {
     "@playwright/test": "^1.61.1",

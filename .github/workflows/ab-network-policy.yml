@@ -50,13 +50,13 @@ jobs:
         with:
           node-version: '22'
       - run: npm ci
-      - run: npx tsc --noEmit
+      - run: npm run typecheck
       - run: npx playwright install --with-deps chromium
 
       - name: 판정 규칙 테스트
         run: |
-          npx playwright test tests/judgment.spec.ts
-          python3 scripts/test_fail_streak.py
+          npm run judge
+          npm run streak
 
       - name: 러너 환경 기록
         run: |
@@ -87,7 +87,7 @@ jobs:
             # 헬스체크는 실제 결함이 있으면 exit 1 이다(현재 ezdown 설치 파일 403).
             # '결함 발견'과 '미완주'는 다르므로 여기서는 종료 코드를 무시하고,
             # 아래에서 리포트 생성·완주 여부로 판정한다.
-            HC_NET_POLICY="$policy" npx playwright test tests/ezlab.spec.ts --reporter=line || true
+            HC_NET_POLICY="$policy" npm run health -- --reporter=line || true
             if [ ! -f report-status.json ]; then
               echo "리포트 미생성 — 테스트가 완주하지 못했습니다 (정책=$policy, 회차=$i)"
               exit 1

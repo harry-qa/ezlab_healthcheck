@@ -29,13 +29,13 @@ WARN과 FAIL을 한 산식에 넣으면 **탐지를 넓힐수록 가동률이 �
 ```bash
 npm install && npx playwright install
 
-npx playwright test                          # 전체 (헬스체크 + 판정 규칙)
-npx playwright test tests/judgment.spec.ts   # 판정 규칙만 (운영 서버 무관, 수초)
-python3 scripts/test_dashboard_metrics.py    # 대시보드 산식
-python3 scripts/test_fail_streak.py          # 연속 장애 판정 규칙
-npx playwright test tests/ezlab.spec.ts      # 실제 헬스체크 (운영 서버에 요청)
+npm run judge          # 판정 규칙 (운영 서버 무관, 수초)
+npm run metrics        # 대시보드 산식
+npm run streak         # 연속 장애 판정 규칙
+npm run health         # 실제 헬스체크 (운영 서버에 요청)
+npx playwright test    # 전체 (헬스체크 + 판정 규칙)
 
-npx tsc --noEmit && npx playwright show-report
+npm run typecheck && npx playwright show-report
 ```
 
 ## 자동 실행
