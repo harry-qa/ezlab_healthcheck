@@ -10,6 +10,7 @@ WARN 이 되어 8월 가동률이 0% 로 표시됐다. 사이트가 나빠진 �
     2. 점검 완주율     : 헬스체크가 제 일을 다 했는가
     3. 무경고 실행률   : 경고 없이 완벽했던 실행의 비율 (기존 산식 · 보조 지표)
     4. 열린 품질 경고  : 지금 몇 개의 결함이 열려 있는가 (런 단위가 아니라 결함 단위)
+    5. 점검 실행률     : 예정된 점검이 실제로 돌긴 했는가 (돌지 않은 구간 = 감시 공백)
 
 이 모듈은 순수 함수만 둔다 — 파일 I/O 도 HTML 생성도 하지 않아야 테스트로 규칙을 고정할 수 있다.
 """
@@ -202,6 +203,68 @@ def no_warning_rate(statuses):
         return None, 0
     passed = sum(1 for s in statuses if s == 'PASS')
     return round(passed / scored * 100, 1), scored
+
+
+# ── 점검 실행률 (감시 커버리지) ────────────────────────────────────────
+# 다른 지표는 전부 '돌아간 런'을 본다. 이건 '아예 돌지 않은 구간'을 본다.
+# GitHub 이 schedule 트리거를 드랍하면 런 기록 자체가 남지 않아서, 그 공백은
+# 어느 지표에도 잡히지 않는다 — 감시 도구가 조용히 멈춘 상태다. 그래서 실제
+# 실행 수를 cron 이 약속한 기대 실행 수와 대조한다. 서비스 품질 지표가 아니라
+# 헬스체크 자체의 커버리지 지표이므로 가용률·완주율과 섞어 쓰지 않는다.
+#
+# 하루 기대 실행 수는 cron 이 바뀔 때마다 달라졌다. 48 을 전 구간에 적용하면
+# 6회/일로 돌던 4~5월이 12% 로 찍힌다 — 드랍이 아니라 설정이 그랬던 것이다.
+# 아래 표의 근거는 .github/workflows/ezlab-health-check.yml 의 git 이력이다.
+# (날짜, 그 날 00:00 KST 부터 적용되는 하루 기대 실행 수)
+SCHEDULE_HISTORY = (
+    ('2026-04-07', 6),    # 0 16,20,0,3,6,10 * * * — 하루 6회
+    ('2026-05-12', 24),   # 0 * * * *   (2026-05-11 17:23 KST 변경)
+    ('2026-06-09', 48),   # 0,30 * * * * (2026-06-08 17:55 KST 변경)
+)                         # 2026-06-11 의 0,30 → 17,47 변경은 회수가 같아 경계가 아니다
+
+# 하루 안에서 스케줄이 바뀐 날. 어느 쪽 기대값도 그 날 전체에는 맞지 않으므로 집계에서 뺀다.
+SCHEDULE_CHANGE_DAYS = frozenset({
+    '2026-04-07',  # 워크플로 신설일 (18:04 KST 부터라 부분 집계)
+    '2026-05-11',  # 6회 → 24회
+    '2026-05-12',  # 24회 → 12회 → 24회 (같은 날 두 번)
+    '2026-06-08',  # 24회 → 48회
+})
+
+
+def expected_runs_per_day(date, history=SCHEDULE_HISTORY):
+    """그 날(KST)에 적용되던 하루 기대 실행 수. 이력보다 앞선 날짜는 None."""
+    rate = None
+    for start, per_day in history:
+        if date >= start:
+            rate = per_day
+        else:
+            break
+    return rate
+
+
+def execution_rate(daily_runs, history=SCHEDULE_HISTORY, changed_days=SCHEDULE_CHANGE_DAYS):
+    """점검 실행률 = 실제 실행 / 기대 실행.
+
+    daily_runs: {'YYYY-MM-DD': 그 날 실제 실행 수}. 진행 중인 오늘은 호출 측이 빼고
+    넘긴다 — 하루가 끝나지 않은 날을 넣으면 실행률이 실제보다 낮게 나온다.
+    반환: (비율 또는 None, 실제 합, 기대 합, 집계한 날 수)
+
+    비율에 상한을 두지 않는다. 100% 를 넘으면 기대값 표가 실제 cron 과 어긋났다는
+    신호이므로 조용히 깎지 않고 그대로 드러낸다.
+    """
+    actual = expected = days = 0
+    for date in sorted(daily_runs):
+        if date in changed_days:
+            continue
+        per_day = expected_runs_per_day(date, history)
+        if per_day is None:
+            continue
+        actual += daily_runs[date]
+        expected += per_day
+        days += 1
+    if expected == 0:
+        return None, 0, 0, 0
+    return round(actual / expected * 100, 1), actual, expected, days
 
 
 def open_quality_warnings(runs_chrono, warn_fingerprints, coverage, resolve_after=2):

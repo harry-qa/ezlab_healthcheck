@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dashboard_metrics import (
     AVAILABLE, OUTAGE, INDETERMINATE,
     OCCURRENCE_NEW, OCCURRENCE_PERSISTING,
-    classify_counts, availability, completion_rate, no_warning_rate,
+    classify_counts, availability, completion_rate, no_warning_rate, execution_rate,
     open_quality_warnings, occurrence_states, is_recovery_record,
     current_state, month_buckets, is_migrated,
 )
@@ -94,6 +94,28 @@ svc_counts = classify_counts([(statuses.get(e, 'UNKNOWN'), _cov(e)) for e in ent
 avail_rate = availability(svc_counts)                       # 서비스 가용률 (주 지표)
 comp_rate, comp_done, comp_known = completion_rate([_cov(e) for e in entries])
 nowarn_rate, nowarn_scored = no_warning_rate([statuses.get(e, 'UNKNOWN') for e in entries])
+
+# 점검 실행률 — 다른 지표가 '돌아간 런'을 보는 것과 달리 '아예 돌지 않은 구간'을 본다.
+# GitHub 이 schedule 트리거를 드랍하면 런 기록 자체가 남지 않아, 그 공백은 다른 어느
+# 지표에도 잡히지 않는다(실측: 2026-08-27~29 하루 2~3회). 기대 회수와 대조해 드러낸다.
+# 진행 중인 오늘은 뺀다 — 하루가 끝나지 않아 실제보다 낮게 나온다. '오늘'은 시스템 시계가
+# 아니라 최신 런 ID(KST)에서 얻는다: 러너 타임존이 바뀌어도 기준이 흔들리지 않는다.
+_today_kst = current_run[:10] if current_run else ''
+_daily_runs = {
+    d: sum(v.get(k, 0) for k in ('PASS', 'WARN', 'FAIL'))
+    for d, v in daily_stats.items()
+    if isinstance(v, dict) and d != _today_kst
+}
+exec_rate, exec_actual, exec_expected, exec_days = execution_rate(_daily_runs)
+_recent_days = dict(sorted(_daily_runs.items())[-7:])
+exec7_rate, exec7_actual, exec7_expected, exec7_days = execution_rate(_recent_days)
+exec_cls = (
+    'score-neutral' if exec7_rate is None else
+    'score-great'   if exec7_rate >= 90 else
+    'score-good'    if exec7_rate >= 75 else
+    'score-warn'    if exec7_rate >= 50 else
+    'score-bad'
+)
 
 # 열린 품질 경고 — 런 단위가 아니라 결함(지문) 단위. 완주 실행만으로 상태를 관리한다.
 def _records(run):
@@ -226,6 +248,11 @@ overview_html = f'''
         <div class="metric-value">{comp_display}</div>
         <div class="metric-sub">{comp_sub}</div>
       </div>
+      <div class="metric-card">
+        <div class="metric-label">점검 실행률 (최근 {exec7_days}일)</div>
+        <div class="metric-value {exec_cls}">{_fmt_rate(exec7_rate)}</div>
+        <div class="metric-sub">기대 {exec7_expected}회 · 실제 {exec7_actual}회</div>
+      </div>
     </div>
     <details class="metric-help">
       <summary>지표 계산 기준</summary>
@@ -233,6 +260,7 @@ overview_html = f'''
         <span><b>서비스 정상률</b>은 정상 이용 가능 실행을 기준으로 계산하며, 점검 미완료·UNKNOWN은 분모에서 제외합니다.</span>
         <span><b>경고 없는 실행</b> {_fmt_rate(nowarn_rate)} <span class="muted">(최근 {nowarn_scored}회 · 검사를 추가하면 낮아질 수 있는 보조 지표)</span></span>
         <span>완주 여부 기록이 없는 과거 실행 {total - comp_known}회는 점검 완료율 계산에서 제외했습니다.</span>
+        <span><b>점검 실행률</b>은 cron 이 약속한 기대 실행 수 대비 실제로 실행된 수입니다. 서비스 품질이 아니라 감시 자체의 커버리지 지표로, 낮으면 그 구간은 점검되지 않은 것입니다. 전체 구간 {exec_days}일 {_fmt_rate(exec_rate)} <span class="muted">(기대 {exec_expected}회 · 실제 {exec_actual}회 · 하루 기대 회수는 cron 변경 이력을 따르고, 스케줄이 바뀐 날과 진행 중인 오늘은 제외)</span></span>
       </div>
     </details>'''
 

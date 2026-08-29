@@ -12,6 +12,7 @@ from dashboard_metrics import (
     open_quality_warnings, current_state, month_buckets, is_migrated,
     vector_of, merge_bucket, vector_invariant_errors, vector_shape_errors, vector_replaced,
     occurrence_states, is_recovery_record, OCCURRENCE_NEW, OCCURRENCE_PERSISTING,
+    expected_runs_per_day, execution_rate, SCHEDULE_HISTORY, SCHEDULE_CHANGE_DAYS,
 )
 
 failures = []
@@ -73,6 +74,39 @@ check('UNKNOWN 은 분모에서 제외', no_warning_rate(['PASS', 'UNKNOWN']), (
 check('판정된 런이 없으면 None', no_warning_rate(['UNKNOWN']), (None, 0))
 check('전 런이 WARN 이면 0% (가용률과 달리 떨어지는 게 정상)',
       no_warning_rate(['WARN'] * 22), (0.0, 22))
+
+print("\n== 점검 실행률 (감시 커버리지) ==")
+# 하루 기대 실행 수는 cron 이력에 따라 달라진다. 48 을 전 구간에 적용하면 6회/일로
+# 돌던 4~5월이 드랍처럼 보인다 — 설정이 그랬던 것이지 누락이 아니다.
+check('4월은 하루 6회 기준', expected_runs_per_day('2026-04-20'), 6)
+check('5월 중순은 하루 24회 기준', expected_runs_per_day('2026-05-20'), 24)
+check('6월 09일부터 하루 48회 기준', expected_runs_per_day('2026-06-09'), 48)
+check('현재도 하루 48회 기준', expected_runs_per_day('2026-08-29'), 48)
+check('이력보다 앞선 날짜는 기대값 없음(None)', expected_runs_per_day('2026-01-01'), None)
+
+check('전부 돌면 100%', execution_rate({'2026-08-20': 48, '2026-08-21': 48}), (100.0, 96, 96, 2))
+check('절반만 돌면 50%', execution_rate({'2026-08-20': 24}), (50.0, 24, 48, 1))
+check('한 번도 안 돌면 0% (기대값은 그대로 남는다)',
+      execution_rate({'2026-08-20': 0}), (0.0, 0, 48, 1))
+check('기대값 없는 구간만 있으면 None — 0% 로 적으면 전면 누락으로 오독',
+      execution_rate({'2026-01-01': 0}), (None, 0, 0, 0))
+check('빈 입력도 None', execution_rate({}), (None, 0, 0, 0))
+
+# 기대값이 다른 구간이 섞이면 날짜별 기대값으로 각각 더한다(평균을 내지 않는다).
+check('구간이 섞이면 날짜별 기대값 합산',
+      execution_rate({'2026-04-20': 6, '2026-08-20': 24}), (round(30 / 54 * 100, 1), 30, 54, 2))
+
+# 하루 안에서 cron 이 바뀐 날은 어느 기대값도 맞지 않아 분모·분자에서 함께 뺀다.
+check('스케줄 변경일은 집계에서 제외',
+      execution_rate({'2026-06-08': 40, '2026-08-20': 48}), (100.0, 48, 48, 1))
+check('제외 대상 날짜 목록이 이력 경계와 일치',
+      sorted(SCHEDULE_CHANGE_DAYS), ['2026-04-07', '2026-05-11', '2026-05-12', '2026-06-08'])
+check('이력은 날짜 오름차순이어야 조회가 성립',
+      [d for d, _ in SCHEDULE_HISTORY], sorted(d for d, _ in SCHEDULE_HISTORY))
+
+# 상한을 두지 않는다 — 100% 초과는 기대값 표가 실제 cron 과 어긋났다는 신호다.
+check('기대보다 많이 돌면 100% 를 넘겨 그대로 드러낸다',
+      execution_rate({'2026-08-20': 60}), (125.0, 60, 48, 1))
 
 print("\n== 열린 품질 경고 (결함 단위 상태 관리) ==")
 OG = 'cdn.ezlab.im/og.png|HTTP_4XX'
