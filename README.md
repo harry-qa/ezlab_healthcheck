@@ -40,8 +40,8 @@ npm run typecheck && npx playwright show-report
 
 ## 자동 실행
 
-- 스케줄 `17,47 * * * *`(30분 주기) + `workflow_dispatch`. 운영 이력·Pages·Slack·Issue 는 **main 정기 스케줄 실행에서만** 갱신하고, 무료 플랜 특성상 일부 실행은 지연·누락됩니다
-- FAIL 시 GitHub Issue 자동 생성 + Slack 알림(신규·지속·복구). 보존은 실행 목록·응답시간 500회 롤링 / 월별·90일 히트맵 영구 / 리포트 폴더 120일
+- 스케줄 `17,47 * * * *`(30분 주기) + `workflow_dispatch`. 운영 이력·Pages·Slack·Issue 는 **main 정기 스케줄 실행에서만** 갱신하고, FAIL 시 GitHub Issue 자동 생성 + Slack 알림(신규·지속·복구). 보존은 실행 목록·응답시간 500회 롤링 / 월별·90일 히트맵 영구 / 리포트 폴더 120일
+- **스케줄은 약속대로 돌지 않습니다.** 기대 대비 실제 실행은 가장 좋은 날도 79%(38/48)였고, 2026-08-27부터는 하루 3~5회입니다. 돈 런은 전부 성공했고 큐 적체·concurrency 밀림·사용량 한도·워크플로 비활성화는 데이터로 배제했습니다 — GitHub 의 schedule 트리거 드랍이며, 누락된 트리거는 런 기록조차 남기지 않습니다. 현재 값은 [대시보드](https://harry-qa.github.io/ezlab_healthcheck/)의 `점검 실행률` 카드에 있습니다
 
 ## 개발 방식
 
