@@ -46,4 +46,3 @@ npx tsc --noEmit && npx playwright show-report
 ## 개발 방식
 
 점검 항목 선정, 판정 기준 설계, 대시보드 지표 정의는 직접 수행했고 구현에는 AI 코딩 도구를 활용했습니다.
-판정 로직 자체의 정확성은 `tests/judgment.spec.ts` · `scripts/test_dashboard_metrics.py` · `scripts/test_fail_streak.py`로 별도 검증하며, CI가 매 실행마다 헬스체크보다 먼저 돌립니다.
