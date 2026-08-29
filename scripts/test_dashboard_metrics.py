@@ -13,6 +13,7 @@ from dashboard_metrics import (
     vector_of, merge_bucket, vector_invariant_errors, vector_shape_errors, vector_replaced,
     occurrence_states, is_recovery_record, OCCURRENCE_NEW, OCCURRENCE_PERSISTING,
     expected_runs_per_day, execution_rate, SCHEDULE_HISTORY, SCHEDULE_CHANGE_DAYS,
+    SCHEDULE_ONLY_FROM,
 )
 
 failures = []
@@ -93,8 +94,21 @@ check('기대값 없는 구간만 있으면 None — 0% 로 적으면 전면 누
 check('빈 입력도 None', execution_rate({}), (None, 0, 0, 0))
 
 # 기대값이 다른 구간이 섞이면 날짜별 기대값으로 각각 더한다(평균을 내지 않는다).
+# since=None 으로 집계 구간 제한을 풀고 이력 조회 자체를 확인한다.
 check('구간이 섞이면 날짜별 기대값 합산',
-      execution_rate({'2026-04-20': 6, '2026-08-20': 24}), (round(30 / 54 * 100, 1), 30, 54, 2))
+      execution_rate({'2026-04-20': 6, '2026-08-20': 24}, since=None),
+      (round(30 / 54 * 100, 1), 30, 54, 2))
+
+# 2026-07-31 21:02 KST 이전 집계에는 수동·브랜치 실행이 섞여 있다(IS_PRODUCTION_RUN 게이트
+# 이전). 그 구간을 넣으면 '스케줄이 돌았나'가 아니라 '아무 런이나 돌았나'를 재게 된다.
+check('집계 시작일 이전은 기본으로 제외',
+      execution_rate({'2026-07-20': 40, '2026-08-20': 48}), (100.0, 48, 48, 1))
+check('제외 경계는 게이트 도입 다음 첫 온전한 날', SCHEDULE_ONLY_FROM, '2026-08-01')
+check('경계 당일은 포함', execution_rate({'2026-08-01': 24}), (50.0, 24, 48, 1))
+check('제외 구간만 있으면 None (0% 로 적으면 전면 누락으로 오독)',
+      execution_rate({'2026-07-20': 40}), (None, 0, 0, 0))
+check('since 를 풀면 과거 구간도 집계한다 (게이트 이전 데이터 검증용)',
+      execution_rate({'2026-07-20': 24}, since=None), (50.0, 24, 48, 1))
 
 # 하루 안에서 cron 이 바뀐 날은 어느 기대값도 맞지 않아 분모·분자에서 함께 뺀다.
 check('스케줄 변경일은 집계에서 제외',

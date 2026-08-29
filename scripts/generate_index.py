@@ -12,6 +12,7 @@ from dashboard_metrics import (
     AVAILABLE, OUTAGE, INDETERMINATE,
     OCCURRENCE_NEW, OCCURRENCE_PERSISTING,
     classify_counts, availability, completion_rate, no_warning_rate, execution_rate,
+    SCHEDULE_ONLY_FROM,
     open_quality_warnings, occurrence_states, is_recovery_record,
     current_state, month_buckets, is_migrated,
 )
@@ -260,7 +261,7 @@ overview_html = f'''
         <span><b>서비스 정상률</b>은 정상 이용 가능 실행을 기준으로 계산하며, 점검 미완료·UNKNOWN은 분모에서 제외합니다.</span>
         <span><b>경고 없는 실행</b> {_fmt_rate(nowarn_rate)} <span class="muted">(최근 {nowarn_scored}회 · 검사를 추가하면 낮아질 수 있는 보조 지표)</span></span>
         <span>완주 여부 기록이 없는 과거 실행 {total - comp_known}회는 점검 완료율 계산에서 제외했습니다.</span>
-        <span><b>점검 실행률</b>은 cron 이 약속한 기대 실행 수 대비 실제로 실행된 수입니다. 서비스 품질이 아니라 감시 자체의 커버리지 지표로, 낮으면 그 구간은 점검되지 않은 것입니다. 전체 구간 {exec_days}일 {_fmt_rate(exec_rate)} <span class="muted">(기대 {exec_expected}회 · 실제 {exec_actual}회 · 하루 기대 회수는 cron 변경 이력을 따르고, 스케줄이 바뀐 날과 진행 중인 오늘은 제외)</span></span>
+        <span><b>점검 실행률</b>은 cron 이 약속한 기대 실행 수 대비 실제로 실행된 수입니다. 서비스 품질이 아니라 감시 자체의 커버리지 지표로, 낮으면 그 구간은 점검되지 않은 것입니다. {SCHEDULE_ONLY_FROM} 이후 {exec_days}일 {_fmt_rate(exec_rate)} <span class="muted">(기대 {exec_expected}회 · 실제 {exec_actual}회 · 하루 기대 회수는 cron 변경 이력을 따르고, 스케줄이 바뀐 날과 진행 중인 오늘은 제외. {SCHEDULE_ONLY_FROM} 이전은 집계에 수동·브랜치 실행이 섞여 있어 뺐습니다)</span></span>
       </div>
     </details>'''
 

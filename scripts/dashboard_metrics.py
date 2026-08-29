@@ -223,6 +223,12 @@ SCHEDULE_HISTORY = (
 )                         # 2026-06-11 의 0,30 → 17,47 변경은 회수가 같아 경계가 아니다
 
 # 하루 안에서 스케줄이 바뀐 날. 어느 쪽 기대값도 그 날 전체에는 맞지 않으므로 집계에서 뺀다.
+# 실행률은 이 날부터의 집계만 쓴다. 2026-07-31 21:02 KST(커밋 d5dd94f1)에 IS_PRODUCTION_RUN
+# 게이트가 생기기 전에는 수동·브랜치 실행도 운영 집계를 갱신했다 — 일별 실행 수에 스케줄이
+# 아닌 런이 섞여 있어서, 실측하면 4월이 기대(6회/일)의 183%로 잡힌다. 그 구간까지 넣으면
+# '스케줄이 약속대로 돌았나'가 아니라 '아무 런이나 몇 번 돌았나'를 재는 지표가 된다.
+SCHEDULE_ONLY_FROM = '2026-08-01'   # 게이트 도입 다음 첫 온전한 날
+
 SCHEDULE_CHANGE_DAYS = frozenset({
     '2026-04-07',  # 워크플로 신설일 (18:04 KST 부터라 부분 집계)
     '2026-05-11',  # 6회 → 24회
@@ -242,11 +248,13 @@ def expected_runs_per_day(date, history=SCHEDULE_HISTORY):
     return rate
 
 
-def execution_rate(daily_runs, history=SCHEDULE_HISTORY, changed_days=SCHEDULE_CHANGE_DAYS):
+def execution_rate(daily_runs, history=SCHEDULE_HISTORY, changed_days=SCHEDULE_CHANGE_DAYS,
+                   since=SCHEDULE_ONLY_FROM):
     """점검 실행률 = 실제 실행 / 기대 실행.
 
     daily_runs: {'YYYY-MM-DD': 그 날 실제 실행 수}. 진행 중인 오늘은 호출 측이 빼고
     넘긴다 — 하루가 끝나지 않은 날을 넣으면 실행률이 실제보다 낮게 나온다.
+    since 이전 날짜는 집계에 스케줄 아닌 런이 섞여 있어 제외한다(SCHEDULE_ONLY_FROM 참고).
     반환: (비율 또는 None, 실제 합, 기대 합, 집계한 날 수)
 
     비율에 상한을 두지 않는다. 100% 를 넘으면 기대값 표가 실제 cron 과 어긋났다는
@@ -254,7 +262,7 @@ def execution_rate(daily_runs, history=SCHEDULE_HISTORY, changed_days=SCHEDULE_C
     """
     actual = expected = days = 0
     for date in sorted(daily_runs):
-        if date in changed_days:
+        if date in changed_days or (since and date < since):
             continue
         per_day = expected_runs_per_day(date, history)
         if per_day is None:
