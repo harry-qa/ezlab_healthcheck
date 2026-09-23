@@ -18,11 +18,22 @@ import sys
 HISTORY_PATH = os.environ.get('FAILURES_HISTORY', '/tmp/failures-history.json')
 STATUS_PATH = os.environ.get('REPORT_STATUS', 'report-status.json')
 
+# '서버가 응답을 못 한다'는 같은 장애의 두 얼굴. 오리진이 멈추면 한 런은 응답 없음(TIMEOUT),
+# 다음 런은 게이트웨이가 502 를 주는(HTTP_5XX) 식으로 번갈아 나온다. 지문이 오류 계열까지
+# 포함해서, 이 둘을 다른 장애로 보면 누적 교집합이 비어 '연속 장애' 알림이 통째로 안 나갔다.
+# 연속 판정에서만 한 계열로 묶는다(리포트·대시보드에 남는 지문 자체는 그대로).
+DOWN_CLASSES = {'TIMEOUT', 'HTTP_5XX'}
+
+
+def normalize_fingerprint(fp):
+    key, sep, cls = fp.rpartition('|')
+    return f'{key}|DOWN' if sep and cls in DOWN_CLASSES else fp
+
 
 def load_current_fingerprints(path=STATUS_PATH):
     try:
         with open(path) as f:
-            return set(json.load(f).get('failFingerprints') or [])
+            return {normalize_fingerprint(x) for x in (json.load(f).get('failFingerprints') or [])}
     except Exception:
         return set()
 
@@ -44,7 +55,7 @@ def load_history_fingerprints(exclude_key, path=HISTORY_PATH):
         if exclude_key and k == exclude_key:
             continue
         recs = hist.get(k) or []
-        out.append({r.get('fingerprint') for r in recs
+        out.append({normalize_fingerprint(r.get('fingerprint')) for r in recs
                     if r.get('fingerprint') and r.get('severity') not in ('WARN', 'INFO')})
     return out
 

@@ -14,7 +14,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fail_streak import effective_streak, previous_effective_streak  # noqa: E402
 
 A = 'ezlab.im/ko|HTTP_5XX'
+A_TIMEOUT = 'ezlab.im/ko|TIMEOUT'
 B = 'cdn.ezlab.im/x.exe|HTTP_4XX'
+B_404 = 'cdn.ezlab.im/x.exe|HTTP_404'
 CUR = '2026-07-31_02-47'
 P1, P2, P3 = '2026-07-31_02-17', '2026-07-31_01-47', '2026-07-31_01-17'
 THRESHOLD = 2
@@ -66,6 +68,14 @@ check('지문 이력 없음 → 횟수 기준 폴백(알림)',
       alert({}, [A], ['FAIL', 'PASS']), (True, 2))
 check('단발 FAIL 1회 → 억제',
       alert({CUR: [A]}, [A], ['PASS', 'PASS']), (False, 1))
+# 오리진이 멈추면 응답 없음(TIMEOUT)과 502(HTTP_5XX)가 번갈아 나온다 — 같은 장애다.
+check('같은 경로 TIMEOUT → 5XX → 알림',
+      alert({CUR: [A], P1: [A_TIMEOUT]}, [A], ['FAIL', 'PASS']), (True, 2))
+check('같은 경로 5XX → TIMEOUT → 5XX → 3회째',
+      alert({CUR: [A], P1: [A_TIMEOUT], P2: [A]}, [A], ['FAIL', 'FAIL']), (True, 3))
+# 묶는 것은 '서버 다운' 계열뿐이다. 4XX↔404 같은 다른 계열은 여전히 다른 장애.
+check('다른 계열(4XX→404)은 묶지 않음 → 억제',
+      alert({CUR: [B_404], P1: [B]}, [B_404], ['FAIL', 'PASS']), (False, 1))
 
 print('\n복구 알림 판정')
 # A→B→PASS: 장애 알림이 나간 적 없으므로 복구 알림도 나가면 안 된다.
@@ -74,6 +84,8 @@ check('A→B→PASS → 복구 알림 없음',
 # A→A→PASS: 같은 장애가 2런 이어져 알림이 나갔으므로 복구 알림이 나가야 한다.
 check('A→A→PASS → 복구 알림 발송',
       recovery({P1: [A], P2: [A]}, ['FAIL', 'FAIL']), True)
+check('TIMEOUT→5XX→PASS (같은 경로) → 복구 알림 발송',
+      recovery({P1: [A], P2: [A_TIMEOUT]}, ['FAIL', 'FAIL']), True)
 check('단발 FAIL 1회 후 PASS → 복구 알림 없음',
       recovery({P1: [A]}, ['FAIL', 'PASS']), False)
 check('지문 이력 없음 + 연속 FAIL 2회 → 폴백으로 복구 알림',

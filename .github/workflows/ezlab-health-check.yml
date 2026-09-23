@@ -9,6 +9,7 @@ permissions:
   contents: write
   pages: write
   issues: write
+  actions: read   # 파이프라인 실패 알림이 직전 런들의 결과를 읽어 반복 알림을 줄인다
 
 # 수동 실행이 스케줄 실행과 겹칠 때 gh-pages 통계 파일이 서로 덮어쓰는 race 방지 — 순차 실행
 concurrency:
@@ -18,6 +19,11 @@ concurrency:
 jobs:
   health-check:
     runs-on: ubuntu-latest
+    # 기본값은 6시간이다. 한 번 멈추면 같은 동시 실행 그룹의 다음 런들이 줄줄이 밀려
+    # 그 시간만큼 점검이 끊긴다. 평소 7~8분이라 여유를 크게 둬도 45분이면 충분하다.
+    # (단계별 timeout 이 먼저 걸려 '실패'로 끝나야 아래 파이프라인 실패 알림이 나간다 —
+    # 잡 전체 timeout 은 '취소'라 알림 단계까지 못 간다. 이건 최후의 방어선이다.)
+    timeout-minutes: 45
     env:
       HEALTH_STATUS: ''
       # 운영 런 = main 브랜치의 정기 스케줄만. 브랜치 푸시·수동 실행은 전부 '검증 런'이다.
@@ -37,28 +43,39 @@ jobs:
           node-version: '22'
 
       - name: 패키지 설치
+        id: install
+        timeout-minutes: 10
         run: npm ci
 
       # 타입 오류를 30분짜리 런타임이 아니라 여기서 즉시 잡는다 (브라우저 설치·테스트 전 빠른 실패)
       - name: 타입 체크 (tsc --noEmit)
+        id: typecheck
+        timeout-minutes: 5
         run: npm run typecheck
 
       - name: Playwright 브라우저 설치 (Chromium)
+        id: browser
+        timeout-minutes: 10
         run: npx playwright install --with-deps chromium
 
       # 판정 규칙 테스트 — 운영 서버를 때리지 않고 수초에 끝난다.
       # 여기서 실패하면 헬스체크 결과를 신뢰할 수 없으므로 continue-on-error 없이 즉시 중단한다.
       - name: 판정 규칙 테스트 (운영 무관)
+        id: judge
+        timeout-minutes: 5
         run: |
           npm run judge
           npm run streak
           npm run metrics
 
       - name: 테스트 실행
+        timeout-minutes: 20
         run: npm run health
         continue-on-error: true
 
       - name: 실행별 리포트 저장 및 인덱스 생성
+        id: report
+        timeout-minutes: 10
         env:
           TZ: Asia/Seoul
         run: |
@@ -133,7 +150,9 @@ jobs:
         run: find reports -name "*.zip" -size +50M -delete
 
       - name: GitHub Pages 배포
+        id: pages
         if: env.IS_PRODUCTION_RUN == 'true'
+        timeout-minutes: 10
         uses: JamesIves/github-pages-deploy-action@d92aa235d04922e8f08b40ce78cc5442fcfbfa2f  # v4.8.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -148,7 +167,12 @@ jobs:
       - name: Slack 알림 (장애 발생 / 실행 실패 / 복구 전환 시)
         # UNKNOWN = 테스트 미완주(결과 파일 미생성) — 사이트가 아니라 헬스체크 자체의 이상이므로 반드시 알림
         # 검증 런(브랜치·수동)은 알림 대상이 아니다 — 오탐이 채널로 나간다.
-        if: env.IS_PRODUCTION_RUN == 'true' && (env.HEALTH_STATUS == 'FAIL' || env.HEALTH_STATUS == 'UNKNOWN' || env.PREV_STATUS == 'FAIL' || env.PREV_STATUS == 'UNKNOWN')
+        # 리포트 생성·Pages 배포가 성공한 런에서만 보낸다. 배포가 실패하면 판정 재료(상태 이력)가
+        # 앞으로 가지 않아, 매 런이 같은 이력으로 판정해 '장애 감지'·'복구'·'간헐 불안정'이 30분마다
+        # 반복된다. 그런 런은 아래 '파이프라인 실패' 알림이 이번 런의 사이트 점검 결과와 함께 알린다
+        # (예전처럼 조용히 빠지지 않는다). !cancelled() 는 그 밖의 단계 실패에 막히지 않게 하려는 것.
+        if: "!cancelled() && steps.report.outcome == 'success' && steps.pages.outcome != 'failure' && env.IS_PRODUCTION_RUN == 'true' && (env.HEALTH_STATUS == 'FAIL' || env.HEALTH_STATUS == 'UNKNOWN' || env.PREV_STATUS == 'FAIL' || env.PREV_STATUS == 'UNKNOWN')"
+        timeout-minutes: 5
         continue-on-error: true
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
@@ -159,7 +183,10 @@ jobs:
       - name: 실패 알림 (GitHub Issue 자동 생성)
         # Slack과 동일하게 연속 2런(FAIL_STREAK >= 2)부터 생성 — 단발 blip이 이슈/코멘트 스팸을 만들지 않도록.
         # (기준값 2는 notify_slack.py의 FAIL_ALERT_THRESHOLD 기본값과 맞춰야 함)
-        if: env.IS_PRODUCTION_RUN == 'true' && env.HEALTH_STATUS == 'FAIL' && env.FAIL_STREAK >= 2
+        # FAIL_STREAK 는 리포트 단계가 계산하므로 그 단계가 끝까지 성공했을 때만 믿는다.
+        # !cancelled() 는 Pages 배포 등 뒤 단계 실패에 이슈 생성이 막히지 않게 하려는 것.
+        if: "!cancelled() && steps.report.outcome == 'success' && env.IS_PRODUCTION_RUN == 'true' && env.HEALTH_STATUS == 'FAIL' && env.FAIL_STREAK >= 2"
+        timeout-minutes: 5
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPORT_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
@@ -179,6 +206,28 @@ jobs:
             BODY=$(printf "## 이지랩 헬스체크 실패\n\n**감지 시각:** %s\n\n### 리포트 확인\n- [GitHub Actions 실행 로그](%s)\n- [헬스체크 리포트 페이지](%s)\n\n> 자동 생성된 이슈입니다. 서비스 복구 후 직접 닫아주세요." "$FAIL_TIME" "$REPORT_URL" "$PAGES_URL")
             gh issue create --title "🚨 헬스체크 실패 감지 - $FAIL_TIME" --body "$BODY" --label "$ISSUE_LABEL" 2>/dev/null || true
           fi
+
+      # 헬스체크 '파이프라인 자체'가 깨졌을 때의 알림. 위 사이트 알림은 리포트 저장 단계가
+      # 만드는 HEALTH_STATUS 로 판단하므로, 그 앞(설치·타입 체크·판정 규칙 테스트·브라우저
+      # 설치)이나 리포트 생성·Pages 배포가 실패하면 아무 알림도 나가지 않았다 — 사이트가
+      # 죽어 있어도 채널이 조용하고 대시보드는 마지막 '정상'에서 멈췄다.
+      # failure() 는 continue-on-error 단계(테스트 실행·Slack·정리)의 실패는 세지 않는다.
+      - name: Slack 알림 (헬스체크 파이프라인 실패)
+        if: failure() && env.IS_PRODUCTION_RUN == 'true'
+        timeout-minutes: 5
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          PAGES_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+          STEP_INSTALL: ${{ steps.install.outcome }}
+          STEP_TYPECHECK: ${{ steps.typecheck.outcome }}
+          STEP_BROWSER: ${{ steps.browser.outcome }}
+          STEP_JUDGE: ${{ steps.judge.outcome }}
+          STEP_REPORT: ${{ steps.report.outcome }}
+          STEP_PAGES: ${{ steps.pages.outcome }}
+        run: python3 scripts/notify_pipeline_failure.py
 
       # 검증 런은 Pages 에 배포되지 않으므로 결과를 아티팩트로 받아볼 수 있게 남긴다.
       - name: 검증 런 리포트 artifact 업로드
