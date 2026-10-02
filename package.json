@@ -8,6 +8,7 @@
     "judge": "playwright test tests/judgment.spec.ts",
     "metrics": "python3 scripts/test_dashboard_metrics.py",
     "streak": "python3 scripts/test_fail_streak.py",
+    "pipeline-alert": "python3 scripts/test_notify_pipeline_failure.py",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [],

@@ -75,6 +75,7 @@ jobs:
         run: |
           npm run judge
           npm run streak
+          npm run pipeline-alert
           npm run metrics
 
       - name: 테스트 실행

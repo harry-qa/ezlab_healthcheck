@@ -32,9 +32,14 @@ WEBHOOK = os.environ.get('SLACK_WEBHOOK_URL', '').strip()
 ATTEMPTS = 4
 TIMEOUT = 15
 REPEAT_EVERY = max(1, int(os.environ.get('PIPELINE_ALERT_REPEAT', '6')))
-# 이 결론이면 '점검이 제대로 안 돈 런'으로 센다. cancelled 는 동시 실행 그룹에서 밀려 취소된
-# 대기 런도 포함돼 세지 않는다.
+# 이 결론이면 '점검이 제대로 안 돈 런'으로 센다.
 FAILED_CONCLUSIONS = {'failure', 'timed_out'}
+# cancelled 는 두 가지가 섞여 있어 결론만으로는 판단할 수 없다(실측, 2026-08-18~19):
+#  - 동시 실행 그룹에서 더 새 런에 밀려 대기 중 취소 → 잡이 아예 없다. 돈 적 없는 런이라 건너뛴다.
+#  - 잡 시간 제한 초과(예전엔 6시간 멈춤, 지금은 45분) → 잡이 돌다 취소됐다. 점검을 못 끝낸 실패로 센다.
+# 예전에는 cancelled 를 만나면 세기를 멈춰서, 대체된 대기 런 하나에 연속 횟수가 0 으로
+# 리셋돼 반복 억제가 풀렸고(같은 장애 알림이 매번 나감), 멈춰서 끊긴 런은 실패로 세지 않았다.
+CANCELLED = 'cancelled'
 # 운영 런의 제목 — 워크플로의 run-name 과 같아야 한다. 정기 실행은 이제 실행기(health-ticker.yml)가
 # workflow_dispatch 로 띄우므로 이벤트만으로는 수동 검증 런과 구분되지 않는다.
 PRODUCTION_TITLE = '이지랩 헬스체크 (정기)'
@@ -43,6 +48,41 @@ PRODUCTION_TITLE = '이지랩 헬스체크 (정기)'
 def is_production_run(r):
     """main 의 운영 런인가 — 예전 schedule 런, 또는 실행기가 띄운 런."""
     return r.get('event') == 'schedule' or r.get('displayTitle') == PRODUCTION_TITLE
+
+
+def run_had_jobs(run_id):
+    """취소된 런에 잡이 있었는가. 못 읽으면 None(모름)."""
+    try:
+        out = subprocess.run(
+            ['gh', 'run', 'view', str(run_id), '--json', 'jobs', '--jq', '.jobs | length'],
+            capture_output=True, text=True, timeout=30)
+        return int(out.stdout.strip()) > 0 if out.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def count_consecutive_failures(runs, current_run_id='', had_jobs=run_had_jobs):
+    """최신순 런 목록에서 직전까지 이어진 운영 런 실패 횟수.
+
+    cancelled: 잡이 있었으면(시간 제한 초과로 끊김) 실패로 세고, 없었거나(대기 중 대체)
+    모르면 건너뛴다 — 연속을 끊지도 늘리지도 않는다.
+    """
+    n = 0
+    for r in runs:
+        if not is_production_run(r):
+            continue
+        if str(r.get('databaseId')) == current_run_id:
+            continue
+        conclusion = r.get('conclusion')
+        if conclusion == CANCELLED:
+            if had_jobs(r.get('databaseId')):
+                n += 1
+            continue
+        if conclusion in FAILED_CONCLUSIONS:
+            n += 1
+        else:
+            break
+    return n
 
 
 def previous_consecutive_failures(env=os.environ):
@@ -60,17 +100,7 @@ def previous_consecutive_failures(env=os.environ):
     except Exception as e:
         print(f'직전 런 조회 실패 — 억제 없이 보낸다: {e}')
         return 0
-    n = 0
-    for r in runs:
-        if not is_production_run(r):
-            continue
-        if str(r.get('databaseId')) == env.get('RUN_ID', ''):
-            continue
-        if r.get('conclusion') in FAILED_CONCLUSIONS:
-            n += 1
-        else:
-            break
-    return n
+    return count_consecutive_failures(runs, env.get('RUN_ID', ''))
 
 
 def should_send(prev_fails):
