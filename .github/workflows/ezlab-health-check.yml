@@ -1,9 +1,18 @@
 name: 이지랩 헬스체크
+# 운영 런과 검증 런을 런 목록에서 구분한다. notify_pipeline_failure.py 가 이 제목으로 직전 운영 런을 찾는다.
+run-name: ${{ (github.event_name == 'schedule' || inputs.trigger == 'ticker') && '이지랩 헬스체크 (정기)' || '이지랩 헬스체크 (검증)' }}
 
 on:
-  schedule:
-    - cron: '17,47 * * * *'  # 매시 17·47분 (30분 주기, 48회/일) — 정시(:00/:30) 러시 회피로 드랍·지연 최소화, 장애 최대 ~30분 내 감지
+  # 30분 주기(매시 17·47분, 48회/일)는 health-ticker.yml 이 workflow_dispatch 로 띄운다.
+  # 여기 있던 schedule('17,47 * * * *')은 GitHub 이 대부분 드랍해(2026-08-27 부터 하루 3~9회)
+  # 뺐다 — 남겨두면 실행기와 같은 슬롯에 중복 런만 생긴다. 실행기 쪽에 백업 스케줄이 있다.
   workflow_dispatch:
+    inputs:
+      trigger:
+        description: '손으로 돌릴 때는 manual 그대로 두세요. ticker 는 실행기 전용이며 운영 이력·Pages·Slack 을 갱신합니다.'
+        type: choice
+        options: [manual, ticker]
+        default: manual
 
 permissions:
   contents: write
@@ -26,10 +35,10 @@ jobs:
     timeout-minutes: 45
     env:
       HEALTH_STATUS: ''
-      # 운영 런 = main 브랜치의 정기 스케줄만. 브랜치 푸시·수동 실행은 전부 '검증 런'이다.
+      # 운영 런 = main 브랜치의 정기 실행만(실행기가 띄운 런, 예전 schedule 런). 브랜치·수동 실행은 전부 '검증 런'이다.
       # 검증 런이 운영 상태 이력·Pages·Slack·이슈를 갱신하면 오탐 알림과 통계 왜곡이 생긴다
       # (실제로 브랜치 검증 런이 statuses.json 에 FAIL 로 쌓여 '간헐 불안정' 알림이 발송됐다).
-      IS_PRODUCTION_RUN: ${{ github.event_name == 'schedule' && github.ref == 'refs/heads/main' }}
+      IS_PRODUCTION_RUN: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.trigger == 'ticker')) && github.ref == 'refs/heads/main' }}
 
     steps:
       - name: 코드 체크아웃

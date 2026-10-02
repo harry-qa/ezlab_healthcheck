@@ -35,17 +35,26 @@ REPEAT_EVERY = max(1, int(os.environ.get('PIPELINE_ALERT_REPEAT', '6')))
 # 이 결론이면 '점검이 제대로 안 돈 런'으로 센다. cancelled 는 동시 실행 그룹에서 밀려 취소된
 # 대기 런도 포함돼 세지 않는다.
 FAILED_CONCLUSIONS = {'failure', 'timed_out'}
+# 운영 런의 제목 — 워크플로의 run-name 과 같아야 한다. 정기 실행은 이제 실행기(health-ticker.yml)가
+# workflow_dispatch 로 띄우므로 이벤트만으로는 수동 검증 런과 구분되지 않는다.
+PRODUCTION_TITLE = '이지랩 헬스체크 (정기)'
+
+
+def is_production_run(r):
+    """main 의 운영 런인가 — 예전 schedule 런, 또는 실행기가 띄운 런."""
+    return r.get('event') == 'schedule' or r.get('displayTitle') == PRODUCTION_TITLE
 
 
 def previous_consecutive_failures(env=os.environ):
-    """이번 런 직전까지 운영 런(main 정기 스케줄)이 연속으로 실패한 횟수. 모르면 0."""
+    """이번 런 직전까지 운영 런(main 정기 실행)이 연속으로 실패한 횟수. 모르면 0."""
     if env.get('PREV_FAILS', '').strip():
         return int(env['PREV_FAILS'])
     try:
+        # 검증 런이 섞여 오므로 운영 런 60개를 확보할 만큼 넉넉히 받는다.
         out = subprocess.run(
             ['gh', 'run', 'list', '--workflow', 'ezlab-health-check.yml', '--branch', 'main',
-             '--event', 'schedule', '--status', 'completed', '--limit', '60',
-             '--json', 'databaseId,conclusion'],
+             '--status', 'completed', '--limit', '120',
+             '--json', 'databaseId,conclusion,event,displayTitle'],
             capture_output=True, text=True, timeout=30)
         runs = json.loads(out.stdout or '[]')
     except Exception as e:
@@ -53,6 +62,8 @@ def previous_consecutive_failures(env=os.environ):
         return 0
     n = 0
     for r in runs:
+        if not is_production_run(r):
+            continue
         if str(r.get('databaseId')) == env.get('RUN_ID', ''):
             continue
         if r.get('conclusion') in FAILED_CONCLUSIONS:

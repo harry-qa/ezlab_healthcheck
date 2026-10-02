@@ -1,0 +1,77 @@
+name: 헬스체크 실행기
+
+# 헬스체크를 30분마다 실제로 띄우는 실행기.
+# GitHub 의 schedule 트리거는 보장이 없다 — 2026-08-27 부터 하루 48회 중 3~9회만 돌았다
+# (돈 런은 전부 성공, 드랍된 트리거는 런 기록조차 없음). 그래서 예약에 기대지 않고,
+# 이 잡이 깨어 있으면서 매시 17·47분에 헬스체크를 workflow_dispatch 로 직접 띄운다.
+#
+# - GITHUB_TOKEN 으로 만든 이벤트는 새 런을 만들지 않지만 workflow_dispatch 는 예외라
+#   별도 PAT 없이 동작한다(actions: write 필요).
+# - 잡 하나는 최대 6시간이라 ~5시간 반 돌고 끝나기 전에 자기 자신을 다시 띄워 연쇄를 잇는다.
+# - 동시 실행 그룹이 실행기를 늘 하나로 유지한다: 돌고 있으면 새로 온 건 대기하고, 대기 중인
+#   게 있으면 더 새 것이 그걸 대체한다. 그래서 아래 백업 스케줄이 몇 번 와도 연쇄는 하나다.
+# - 기다리는 동안 러너를 붙잡고 있는 방식이다. 공개 레포라 비용은 없고, 동시 잡 한도(20) 중 1개를 쓴다.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 백업 — 연쇄가 끊겼을 때(자기 재호출 실패, 러너 유실) 다시 살린다. 이것도 드랍되지만
+    # 하루 몇 번만 와도 충분하다. 연쇄가 살아 있으면 대기열에서 다음 실행기로 대체돼 취소된다.
+    - cron: '7,37 * * * *'
+
+permissions:
+  actions: write   # workflow_dispatch 호출
+
+concurrency:
+  group: health-ticker
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    # 운영 헬스체크는 main 에서만 띄운다 — 브랜치에서 손으로 돌린 실행기가 운영 런을 만들면 안 된다.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+      RUN_MINUTES: 330      # 이 시간 안에 오는 슬롯만 처리하고 다음 실행기에 넘긴다 (잡 한도 360분)
+      SLOT_OFFSET: 1020     # 매 30분 구간의 17분째(=17*60초) — 정시 러시 회피, 기존 cron '17,47' 과 같은 시각
+    steps:
+      - name: 30분마다 헬스체크 실행
+        run: |
+          set -u
+          dispatch() {
+            for i in 1 2 3; do
+              gh workflow run "$@" -R "$REPO" --ref main && return 0
+              sleep $((i * 20))
+            done
+            return 1
+          }
+
+          deadline=$(( $(date +%s) + RUN_MINUTES * 60 ))
+          while :; do
+            now=$(date +%s)
+            wait=$(( (SLOT_OFFSET - now % 1800 + 1800) % 1800 ))
+            if [ $((now + wait)) -gt "$deadline" ]; then break; fi
+            echo "다음 슬롯 $(TZ=Asia/Seoul date -d "@$((now + wait))" +'%H:%M') KST 까지 ${wait}초 대기"
+            sleep "$wait"
+            if dispatch ezlab-health-check.yml -f trigger=ticker; then
+              echo "헬스체크 실행 요청 — $(TZ=Asia/Seoul date +'%Y-%m-%d %H:%M:%S') KST"
+            else
+              echo "::warning::헬스체크 실행 요청 실패 — 다음 슬롯에서 다시 시도"
+            fi
+            sleep 60   # 같은 슬롯을 두 번 처리하지 않도록
+          done
+
+      - name: 다음 실행기로 연쇄
+        # 위 단계가 실패해도 연쇄는 잇는다. 여기서 실패하면 백업 스케줄이 살릴 때까지 공백이 생긴다.
+        # 손으로 '취소'한 경우만은 잇지 않는다 — 연쇄를 멈추는 수단이다(완전히 멈추려면 워크플로 비활성화).
+        if: "!cancelled()"
+        run: |
+          for i in 1 2 3; do
+            gh workflow run health-ticker.yml -R "$REPO" --ref main && exit 0
+            sleep $((i * 20))
+          done
+          echo "::error::다음 실행기 호출 실패 — 백업 스케줄이 다시 시작할 때까지 헬스체크가 멈춘다"
+          exit 1
