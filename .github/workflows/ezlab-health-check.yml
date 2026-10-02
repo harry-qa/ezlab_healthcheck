@@ -1,6 +1,6 @@
 name: 이지랩 헬스체크
 # 운영 런과 검증 런을 런 목록에서 구분한다. notify_pipeline_failure.py 가 이 제목으로 직전 운영 런을 찾는다.
-run-name: ${{ (github.event_name == 'schedule' || inputs.trigger == 'ticker') && '이지랩 헬스체크 (정기)' || '이지랩 헬스체크 (검증)' }}
+run-name: ${{ (github.event_name == 'schedule' || inputs.trigger == 'ticker') && github.ref == 'refs/heads/main' && '이지랩 헬스체크 (정기)' || '이지랩 헬스체크 (검증)' }}
 
 on:
   # 30분 주기(매시 17·47분, 48회/일)는 health-ticker.yml 이 workflow_dispatch 로 띄운다.

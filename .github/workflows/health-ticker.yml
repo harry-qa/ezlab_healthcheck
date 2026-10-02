@@ -11,6 +11,10 @@ name: 헬스체크 실행기
 # - 동시 실행 그룹이 실행기를 늘 하나로 유지한다: 돌고 있으면 새로 온 건 대기하고, 대기 중인
 #   게 있으면 더 새 것이 그걸 대체한다. 그래서 아래 백업 스케줄이 몇 번 와도 연쇄는 하나다.
 # - 기다리는 동안 러너를 붙잡고 있는 방식이다. 공개 레포라 비용은 없고, 동시 잡 한도(20) 중 1개를 쓴다.
+#
+# 멈추는 법: Actions 에서 이 워크플로를 비활성화한다. 돌고 있는 실행기가 다음 슬롯에서
+# 상태를 보고 스스로 끝나며 다음 실행기도 띄우지 않는다(최대 30분). 런을 손으로 취소하는 것만으로는
+# 대기 중인 백업 실행기가 이어받아 멈추지 않는다.
 
 on:
   workflow_dispatch:
@@ -20,7 +24,7 @@ on:
     - cron: '7,37 * * * *'
 
 permissions:
-  actions: write   # workflow_dispatch 호출
+  actions: write   # workflow_dispatch 호출 · 워크플로 상태와 직전 런 조회
 
 concurrency:
   group: health-ticker
@@ -34,10 +38,34 @@ jobs:
     timeout-minutes: 345
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
       REPO: ${{ github.repository }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       RUN_MINUTES: 330      # 이 시간 안에 오는 슬롯만 처리하고 다음 실행기에 넘긴다 (잡 한도 360분)
       SLOT_OFFSET: 1020     # 매 30분 구간의 17분째(=17*60초) — 정시 러시 회피, 기존 cron '17,47' 과 같은 시각
+      GAP_ALERT_MINUTES: 60 # 마지막 정기 점검이 이보다 오래됐으면 '감시 공백'으로 알린다
     steps:
+      - name: 감시 공백 확인
+        # 연쇄가 살아 있으면 실행기는 늘 직전 실행기가 띄운다. 그런데도 마지막 정기 점검이 오래됐다면
+        # 연쇄가 끊겼다가(러너 유실·재호출 실패) 이제 살아난 것이다 — 그 사이 헬스체크가 0회였다.
+        # 끊긴 '동안'은 알릴 주체가 없으므로, 적어도 살아난 시점에 공백을 알린다.
+        continue-on-error: true
+        run: |
+          last=$(gh run list -R "$REPO" --workflow ezlab-health-check.yml --branch main -L 30 \
+                   --json createdAt,displayTitle,event \
+                   --jq '[.[] | select(.event == "schedule" or .displayTitle == "이지랩 헬스체크 (정기)")][0].createdAt // empty')
+          [ -n "$last" ] || { echo "직전 정기 점검을 찾지 못함 — 건너뜀"; exit 0; }
+          gap=$(( ($(date +%s) - $(date -d "$last" +%s)) / 60 ))
+          echo "마지막 정기 점검: $last (${gap}분 전)"
+          if [ "$gap" -ge "$GAP_ALERT_MINUTES" ]; then
+            msg="⚠️ 이지랩 헬스체크 *감시 공백* — 마지막 정기 점검 이후 ${gap}분 동안 점검이 돌지 않았습니다. 실행기가 다시 시작돼 다음 슬롯부터 재개합니다. <${RUN_URL}|실행기 로그>"
+            if [ -n "$SLACK_WEBHOOK_URL" ]; then
+              python3 -c 'import json,sys; print(json.dumps({"text": sys.argv[1]}))' "$msg" \
+                | curl -sS -m 15 --retry 3 -H 'Content-Type: application/json' --data @- "$SLACK_WEBHOOK_URL" \
+                || echo "::warning::감시 공백 Slack 발송 실패"
+            fi
+          fi
+
       - name: 30분마다 헬스체크 실행
         run: |
           set -u
@@ -56,6 +84,13 @@ jobs:
             if [ $((now + wait)) -gt "$deadline" ]; then break; fi
             echo "다음 슬롯 $(TZ=Asia/Seoul date -d "@$((now + wait))" +'%H:%M') KST 까지 ${wait}초 대기"
             sleep "$wait"
+            # 비활성화되면 여기서 멈춘다. 상태를 못 읽으면(API 오류) 멈추지 않는다 — 감시가 끊기는 쪽이 더 나쁘다.
+            state=$(gh api "repos/$REPO/actions/workflows/health-ticker.yml" --jq .state 2>/dev/null || echo unknown)
+            if [ "$state" != "active" ] && [ "$state" != "unknown" ]; then
+              echo "실행기 워크플로가 '$state' — 연쇄를 멈춘다"
+              echo "TICKER_STOPPED=1" >> "$GITHUB_ENV"
+              exit 0
+            fi
             if dispatch ezlab-health-check.yml -f trigger=ticker; then
               echo "헬스체크 실행 요청 — $(TZ=Asia/Seoul date +'%Y-%m-%d %H:%M:%S') KST"
             else
@@ -65,13 +100,18 @@ jobs:
           done
 
       - name: 다음 실행기로 연쇄
-        # 위 단계가 실패해도 연쇄는 잇는다. 여기서 실패하면 백업 스케줄이 살릴 때까지 공백이 생긴다.
-        # 손으로 '취소'한 경우만은 잇지 않는다 — 연쇄를 멈추는 수단이다(완전히 멈추려면 워크플로 비활성화).
-        if: "!cancelled()"
+        # 위 단계가 실패해도 연쇄는 잇는다. 비활성화로 멈춘 경우와 손으로 취소한 경우만 잇지 않는다.
+        if: "!cancelled() && env.TICKER_STOPPED != '1'"
         run: |
           for i in 1 2 3; do
             gh workflow run health-ticker.yml -R "$REPO" --ref main && exit 0
             sleep $((i * 20))
           done
           echo "::error::다음 실행기 호출 실패 — 백업 스케줄이 다시 시작할 때까지 헬스체크가 멈춘다"
+          msg="🚨 이지랩 헬스체크 *실행기 연쇄 끊김* — 다음 실행기를 띄우지 못했습니다. 백업 스케줄이 살릴 때까지(수 시간 걸릴 수 있음) 헬스체크가 돌지 않습니다. Actions 에서 '헬스체크 실행기'를 수동 실행해 주세요. <${RUN_URL}|실행기 로그>"
+          if [ -n "$SLACK_WEBHOOK_URL" ]; then
+            python3 -c 'import json,sys; print(json.dumps({"text": sys.argv[1]}))' "$msg" \
+              | curl -sS -m 15 --retry 3 -H 'Content-Type: application/json' --data @- "$SLACK_WEBHOOK_URL" \
+              || echo "::warning::연쇄 끊김 Slack 발송 실패"
+          fi
           exit 1
