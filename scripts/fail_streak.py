@@ -99,6 +99,24 @@ def effective_streak(cur_status, recent, exclude_key,
     return (cnt if fps_streak is None else min(cnt, fps_streak)), fps_streak, cnt
 
 
+def should_repeat(streak, first, every):
+    """first 회째에 첫 알림, 그 뒤로는 every 회마다만 — 같은 내용의 반복 알림을 줄인다.
+
+    실행기 도입 후 런이 실제로 30분마다 돌아, 매 런 알리면 장애 한 건에 30분마다 같은 알림이 쌓인다.
+    """
+    return streak >= first and (streak - first) % max(1, every) == 0
+
+
+def new_fingerprints(cur_fps, history_fps):
+    """직전 런에 없던 장애 지문 — 장애가 이어지는 중에 새로 깨진 곳. 반복 억제와 무관하게 바로 알린다.
+
+    직전 런의 지문을 모르면(이력 없음·지문 없는 과거 기록) 빈 집합 — 억제 주기를 따른다.
+    """
+    if not history_fps or not history_fps[0]:
+        return set()
+    return set(cur_fps) - history_fps[0]
+
+
 def previous_effective_streak(recent, exclude_key, history_path=HISTORY_PATH):
     """직전 런 시점의 판정을 재현한다 — 복구 알림을 낼지(직전 장애가 실제 알림됐는지) 결정용.
 

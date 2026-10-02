@@ -3,9 +3,11 @@ Slack 알림 — 디바운스 기반 발송(스팸 방지).
 
 발송 조건(워크플로우에서 if로 1차 필터, 여기서 2차 확정):
 - 장애 감지 : FAIL이 연속 FAIL_ALERT_THRESHOLD(기본 2)런 이어졌을 때 첫 알림.
-              단발 blip(1런 FAIL 후 자동 회복)은 침묵. 이후 FAIL 지속 시 매 런 '지속 중' 재알림.
+              단발 blip(1런 FAIL 후 자동 회복)은 침묵. 이후 FAIL 지속 시 ALERT_REPEAT(기본 6 = 3시간)런마다
+              '지속 중' 재알림 — 단, 직전 런에 없던 곳이 새로 깨지면 주기와 무관하게 바로 알린다.
 - 실행 실패 : HEALTH_STATUS == UNKNOWN — 테스트가 완주하지 못해 결과 파일이 없음.
               사이트가 아니라 헬스체크 자체의 이상이라 방치되면 감시 공백이 생기므로 즉시(1회부터) 알림.
+              계속되면 ALERT_REPEAT 런마다 재알림.
 - 간헐 불안정: 연속은 아니지만 최근 FLAP_WINDOW(기본 6)런 중 FLAP_DOWNS(기본 3)회 이상 다운.
               FAIL↔PASS/WARN을 오가는 flapping이 연속 임계에 안 걸려 침묵하는 사각 보완.
               조건을 '새로 넘는 순간' 1회만 발송(에피소드당 1회) — 복구 알림 없음.
@@ -14,7 +16,7 @@ Slack 알림 — 디바운스 기반 발송(스팸 방지).
 환경변수:
   SLACK_WEBHOOK_URL (필수 — 없으면 조용히 스킵)
   HEALTH_STATUS, PREV_STATUS, RECENT_STATUSES(최신→과거, 현재 런 제외), RUN_DATETIME, RUN_URL, PAGES_URL
-  FAIL_ALERT_THRESHOLD(기본 2), FLAP_WINDOW(기본 6), FLAP_DOWNS(기본 3)
+  FAIL_ALERT_THRESHOLD(기본 2), ALERT_REPEAT(기본 6), FLAP_WINDOW(기본 6), FLAP_DOWNS(기본 3)
 report-status.json 에서 상세(failCount/warnCount/failures)를 읽는다.
 """
 import os, json, sys, time, urllib.request
@@ -122,6 +124,8 @@ for s in recent:
 # 계산 규칙은 GitHub 이슈 생성 게이트와 반드시 같아야 해서 scripts/fail_streak.py 한 곳에 둔다.
 from fail_streak import effective_streak as _eff_streak
 from fail_streak import previous_effective_streak as _prev_eff_streak
+from fail_streak import (should_repeat, new_fingerprints, load_current_fingerprints,
+                         load_history_fingerprints)
 
 _eff, fp_streak, _cnt = _eff_streak(cur, recent, _dt)
 
@@ -129,9 +133,24 @@ is_fail     = cur == 'FAIL'
 is_unknown  = cur == 'UNKNOWN'                       # 테스트 미완주 — 헬스체크 자체 이상
 # 지문 대조가 가능하면 '같은 장애가 연속인지'를 기준으로 쓴다(서로 다른 단발의 오묶음 방지).
 effective_streak = _eff
-# UNKNOWN은 1회부터, FAIL은 연속 FAIL THRESHOLD회부터 알림
-down_alert  = is_unknown or (is_fail and effective_streak >= THRESHOLD)
+# 반복 억제 — 같은 내용은 REPEAT 런(기본 6 = 3시간)마다만 다시 알린다.
+REPEAT = max(1, int(os.environ.get('ALERT_REPEAT', '6')))
+unknown_streak = 0
+if is_unknown:
+    unknown_streak = 1
+    for s in recent:
+        if s == 'UNKNOWN':
+            unknown_streak += 1
+        else:
+            break
+added_fps = (new_fingerprints(load_current_fingerprints(), load_history_fingerprints(_dt))
+             if is_fail and effective_streak > THRESHOLD else set())
+# UNKNOWN은 1회부터, FAIL은 연속 FAIL THRESHOLD회부터 알림(그 뒤로는 반복 주기 또는 새로 깨진 곳이 있을 때)
+down_alert  = ((is_unknown and should_repeat(unknown_streak, 1, REPEAT))
+               or (is_fail and (should_repeat(effective_streak, THRESHOLD, REPEAT) or bool(added_fps))))
 is_new_fail = is_fail and effective_streak == THRESHOLD  # 임계 도달 첫 알림 = '장애 감지', 이후 = '지속 중'
+# 반복 억제로 침묵하는 런이 '간헐 불안정'으로 새어 나가지 않게 — 그 판정은 알림 대상 장애가 아닐 때만이다.
+suppressed  = (is_unknown and not down_alert) or (is_fail and effective_streak >= THRESHOLD and not down_alert)
 # 복구: 정상 전환 && 직전 장애가 '실제로 알림된' 수준이었을 때만 — 단발 blip 자동회복은 침묵.
 # 직전 런 시점의 판정을 재현한다. 지문은 반드시 '이력'에서 읽어야 한다 —
 # 현재 런이 PASS면 report-status.json 의 지문이 비어 있어 원시 횟수로 폴백해버리고,
@@ -148,12 +167,14 @@ FLAP_WINDOW = max(2, int(os.environ.get('FLAP_WINDOW', '6')))
 FLAP_DOWNS  = max(2, int(os.environ.get('FLAP_DOWNS', '3')))
 downs_now   = sum(1 for s in [cur] + recent[:FLAP_WINDOW - 1] if _down(s))
 downs_prev  = sum(1 for s in recent[:FLAP_WINDOW] if _down(s))
-is_unstable = (_down(cur) and not down_alert
+is_unstable = (_down(cur) and not down_alert and not suppressed
                and downs_now >= FLAP_DOWNS and downs_prev < FLAP_DOWNS)
 
 if not (down_alert or is_unstable or is_recovery):
-    print(f'알림 대상 아님(cur={cur}, prev={prev}, streak={streak}, prev_streak={prev_streak}, '
-          f'thr={THRESHOLD}, downs={downs_now}/{FLAP_WINDOW}) — 스킵')
+    why = '반복 억제' if suppressed else '알림 대상 아님'
+    print(f'{why}(cur={cur}, prev={prev}, streak={streak}, prev_streak={prev_streak}, '
+          f'eff={effective_streak}, unknown={unknown_streak}, thr={THRESHOLD}, repeat={REPEAT}, '
+          f'downs={downs_now}/{FLAP_WINDOW}) — 스킵')
     sys.exit(0)
 
 try:
@@ -180,7 +201,9 @@ if is_unknown:
     color  = '#d29922'
     body   = ('테스트가 완주하지 못해 결과 파일이 생성되지 않았습니다.\n'
               '(브라우저 크래시 / 전체 타임아웃 / 의존성 설치 실패 가능성)\n'
-              '이번 런에서는 *사이트 상태가 확인되지 않았습니다* — 실행 로그를 확인해주세요.')
+              '이번 런에서는 *사이트 상태가 확인되지 않았습니다* — 실행 로그를 확인해주세요.'
+              + (f'\n*{unknown_streak}회 연속* 실행 실패 중입니다.' if unknown_streak > 1 else '')
+              + f'\n계속되면 {REPEAT}런({REPEAT * 30 // 60}시간)마다 다시 알립니다.')
 elif is_unstable:
     header = '🟠 이지랩 헬스체크 *간헐 장애 (불안정)*'
     color  = '#d29922'
@@ -208,6 +231,9 @@ elif is_fail:
         lines.append(f"{i}. [{fr.get('type','-')}/{fr.get('lang','-')}] `{st_txt}` {fr.get('url','-')}  — {fr.get('symptom','-')}")
     if len(fail_only) > 5:
         lines.append(f'…외 {len(fail_only) - 5}건')
+    if added_fps:
+        lines.append(f'🆕 직전 런 이후 *새로 깨진 곳 {len(added_fps)}건* — 그래서 반복 주기와 별개로 알립니다.')
+    lines.append(f'같은 장애가 이어지면 {REPEAT}런({REPEAT * 30 // 60}시간)마다 다시 알립니다. 새로 깨지는 곳이 생기면 바로 알립니다.')
     body = '\n'.join(lines)
 else:  # recovery
     header = '✅ 이지랩 헬스체크 *복구됨*'

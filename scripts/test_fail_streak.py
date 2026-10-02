@@ -93,6 +93,20 @@ check('지문 이력 없음 + 연속 FAIL 2회 → 폴백으로 복구 알림',
 check('직전이 PASS → 복구 대상 아님',
       recovery({}, ['PASS', 'PASS']), False)
 
+print('\n== 반복 알림 억제 ==')
+from fail_streak import should_repeat, new_fingerprints  # noqa: E402
+# 장애 지속: 2회째 첫 알림, 그 뒤 6런(3시간)마다
+check('FAIL 2회째 첫 알림', should_repeat(2, 2, 6), True)
+check('FAIL 3~7회째 침묵', [should_repeat(n, 2, 6) for n in range(3, 8)], [False] * 5)
+check('FAIL 8회째 재알림(3시간)', should_repeat(8, 2, 6), True)
+check('FAIL 임계 전 침묵', should_repeat(1, 2, 6), False)
+# 실행 실패: 1회째 즉시, 그 뒤 6런마다
+check('UNKNOWN 1·7·13회째만', [n for n in range(1, 15) if should_repeat(n, 1, 6)], [1, 7, 13])
+check('새로 깨진 곳', new_fingerprints({A, B}, [{A}]), {B})
+check('같은 장애만 이어지면 없음', new_fingerprints({A}, [{A, B}]), set())
+check('직전 지문 모르면 없음(주기 따름)', new_fingerprints({A}, [set()]), set())
+check('이력 없으면 없음', new_fingerprints({A}, []), set())
+
 print()
 if failures:
     print(f'실패 {len(failures)}건: {", ".join(failures)}')

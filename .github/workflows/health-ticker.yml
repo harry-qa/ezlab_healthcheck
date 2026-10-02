@@ -55,6 +55,10 @@ jobs:
                    --json createdAt,displayTitle,event \
                    --jq '[.[] | select(.event == "schedule" or .displayTitle == "이지랩 헬스체크 (정기)")][0].createdAt // empty')
           [ -n "$last" ] || { echo "직전 정기 점검을 찾지 못함 — 건너뜀"; exit 0; }
+          # 실행기가 처음 켜지는 때(이전에 끝까지 돈 실행기가 없음)의 공백은 '끊김'이 아니라 도입 전 상태다 — 알리지 않는다.
+          prior=$(gh run list -R "$REPO" --workflow health-ticker.yml -L 30 --json databaseId,conclusion \
+                    --jq "[.[] | select(.databaseId != ${GITHUB_RUN_ID} and (.conclusion == \"success\" or .conclusion == \"failure\"))] | length")
+          [ "${prior:-0}" -gt 0 ] || { echo "첫 실행기 — 공백 알림 생략"; exit 0; }
           gap=$(( ($(date +%s) - $(date -d "$last" +%s)) / 60 ))
           echo "마지막 정기 점검: $last (${gap}분 전)"
           if [ "$gap" -ge "$GAP_ALERT_MINUTES" ]; then
