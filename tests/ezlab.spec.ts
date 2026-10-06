@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as http from 'http';
 import * as https from 'https';
 import * as tls from 'tls';
 import * as crypto from 'crypto';
@@ -56,23 +57,31 @@ function probeFileRange(
     const done = (r: { status: number; contentRange: string; contentType?: string; bytes: number; note: string }) => {
       if (!settled) { settled = true; resolve({ contentType: '', ...r }); }
     };
-    const req = https.get(url, { headers: { ...headers, Range: 'bytes=0-0' } }, res => {
-      const status = res.statusCode ?? 0;
-      const contentRange = String(res.headers['content-range'] ?? '');
-      const contentType = String(res.headers['content-type'] ?? '');
-      if (status !== 206) {
-        // Range 무시(200) 또는 오류 — 본문을 받기 전에 끊는다. 전체 다운로드 방지의 핵심.
-        req.destroy();
-        done({ status, contentRange, contentType, bytes: 0, note: status === 200 ? 'Range 무시(전체 응답) — 연결 중단' : '' });
-        return;
-      }
-      let bytes = 0;
-      res.on('data', (c: Buffer) => { bytes += c.length; if (bytes > 4096) req.destroy(); });
-      res.on('end',   () => done({ status, contentRange, contentType, bytes, note: '' }));
-      res.on('error', () => done({ status, contentRange, contentType, bytes, note: '' }));
-    });
-    req.on('error', () => done({ status: 0, contentRange: '', bytes: 0, note: '연결 실패' }));
-    req.setTimeout(timeoutMs, () => { req.destroy(); done({ status: 0, contentRange: '', bytes: 0, note: '타임아웃' }); });
+    // 요청을 '만드는' 단계의 예외(잘못된 주소, https 모듈에 http 주소 등)는 동기로 던져진다.
+    // 그대로 두면 Promise 가 reject 돼 호출한 STEP 이 통째로 중단되고 리포트가 저장되지 않는다
+    // (런이 UNKNOWN 으로 잡혀 Slack 알림). 응답 없음(0)으로 돌려 호출부가 판정하게 한다.
+    try {
+      const client = /^http:/i.test(url) ? http : https;
+      const req = client.get(url, { headers: { ...headers, Range: 'bytes=0-0' } }, res => {
+        const status = res.statusCode ?? 0;
+        const contentRange = String(res.headers['content-range'] ?? '');
+        const contentType = String(res.headers['content-type'] ?? '');
+        if (status !== 206) {
+          // Range 무시(200) 또는 오류 — 본문을 받기 전에 끊는다. 전체 다운로드 방지의 핵심.
+          req.destroy();
+          done({ status, contentRange, contentType, bytes: 0, note: status === 200 ? 'Range 무시(전체 응답) — 연결 중단' : '' });
+          return;
+        }
+        let bytes = 0;
+        res.on('data', (c: Buffer) => { bytes += c.length; if (bytes > 4096) req.destroy(); });
+        res.on('end',   () => done({ status, contentRange, contentType, bytes, note: '' }));
+        res.on('error', () => done({ status, contentRange, contentType, bytes, note: '' }));
+      });
+      req.on('error', () => done({ status: 0, contentRange: '', bytes: 0, note: '연결 실패' }));
+      req.setTimeout(timeoutMs, () => { req.destroy(); done({ status: 0, contentRange: '', bytes: 0, note: '타임아웃' }); });
+    } catch (e) {
+      done({ status: 0, contentRange: '', bytes: 0, note: `요청 생성 실패 (${String((e as Error)?.message ?? e).split('\n')[0].slice(0, 80)})` });
+    }
   });
 }
 
@@ -190,7 +199,10 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   // 이미지 검사는 resourceType 'image' 만 봐서 <video> 는 통째로 빠져 있었다. 재생 품질은
   // 자동화로 판단할 수 없으므로 '주소가 살아 있고 영상 파일로 응답하는지'까지만 본다.
   // 수집은 이미 하는 방문(STEP5 메인 · STEP4 도구 페이지)의 DOM 에서만 한다 — 추가 렌더 없음.
-  const videoRefs = new Map<string, { langs: Set<string>; pages: Set<string> }>();
+  // 판정은 <video> 요소 단위다. 사이트는 webm·mp4 를 <source> 로 나란히 싣고 브라우저는 그중
+  // 재생 가능한 첫 소스를 쓴다 — 소스 하나라도 살아 있으면 화면에는 영상이 나온다.
+  // 키는 소스 목록(순서 유지)이라 같은 영상을 여러 페이지·언어가 써도 한 번만 판정한다.
+  const videoRefs = new Map<string, { sources: string[]; langs: Set<string>; pages: Set<string> }>();
   const checkedVideoUrls = new Set<string>();
   // 영상은 회사 CDN(cdn.mobsoft.net)에 있다. OWN_HOST_RE 를 넓히면 식별 헤더·비콘 정책까지 바뀌므로
   // 영상 판정에만 쓰는 목록을 따로 둔다. 여기 없는 호스트의 영상은 제3자 자원이라 INFO 로만 남긴다.
@@ -200,17 +212,21 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   };
   async function collectVideoRefs(lang: string, pageUrl: string) {
     try {
-      // <video src> 와 <source src> 둘 다 — 사이트는 webm·mp4 를 <source> 로 나란히 싣는다.
-      const srcs = await page.locator('video[src], video source[src]').evaluateAll(
-        els => els.map(e => (e as HTMLVideoElement | HTMLSourceElement).src).filter(Boolean),
-      );
-      for (const src of srcs) {
-        if (!/^https?:\/\//i.test(src)) continue; // blob:·data: 는 주소 검증 대상이 아니다
-        const url = src.split('#')[0];
-        const ref = videoRefs.get(url) ?? { langs: new Set<string>(), pages: new Set<string>() };
+      // <video src> 와 그 안의 <source src> 를 요소별로 — .src 는 절대 주소로 풀린 값이다.
+      const perVideo = await page.locator('video').evaluateAll(els => els.map(v => {
+        const own = v.getAttribute('src') ? [(v as HTMLVideoElement).src] : [];
+        const fromSources = Array.from(v.querySelectorAll('source[src]')).map(x => (x as HTMLSourceElement).src);
+        return [...own, ...fromSources].filter(Boolean);
+      }));
+      for (const raw of perVideo) {
+        // blob:·data: 는 주소 검증 대상이 아니다
+        const sources = [...new Set(raw.filter(u => /^https?:\/\//i.test(u)).map(u => u.split('#')[0]))];
+        if (sources.length === 0) continue;
+        const key = sources.join(' ');
+        const ref = videoRefs.get(key) ?? { sources, langs: new Set<string>(), pages: new Set<string>() };
         ref.langs.add(lang);
         ref.pages.add(pageUrl);
-        videoRefs.set(url, ref);
+        videoRefs.set(key, ref);
       }
     } catch { /* 수집 실패는 영상 검사 범위만 줄인다 — 이 방문의 본래 판정을 깨지 않는다 */ }
   }
@@ -2247,70 +2263,116 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   // ══════════════════════════════════════════════════════════════════
   // STEP 4-2: 영상 주소 확인 (메인 히어로 필름 · 도구별 소개 영상)
   // ══════════════════════════════════════════════════════════════════
-  // STEP5·STEP4 방문에서 모은 <video>/<source> 주소를 Range 1바이트로 확인한다.
+  // STEP5·STEP4 방문에서 모은 <video> 의 소스 주소를 Range 1바이트로 확인한다.
   // 영상은 수 MB~수십 MB 라 본문을 받지 않는다 — 설치 파일과 같은 스트리밍 프로브를 쓴다.
-  // 정상 = 206(+Content-Range) 또는 200, 그리고 Content-Type 이 video/*.
-  // CDN 이 없는 파일에 오류 HTML 을 200 으로 주는 경우를 타입 검사로 거른다.
+  // 주소 정상 = 3xx · 200 · 206(+Content-Range). 단 2xx 인데 text/html 이면 CDN 이 없는 파일에
+  // 오류 페이지를 준 것이라 실패로 본다(octet-stream 같은 느슨한 타입은 재생되므로 통과).
+  // 등급: 요소의 소스가 전부 죽음 → WARN(화면에 영상 없음) · 일부만 죽음 → INFO(폴백 누락, 화면은 정상).
+  const VIDEO_PROBE_CONCURRENCY = 6; // 65건 안팎을 직렬로 돌면 14초 — 예산(510초) 여유를 위해 묶어서 보낸다
   stepMark('STEP 4-2');
   await test.step('STEP 4-2 · 영상 주소 확인', async () => {
-    console.log(`[INFO][영상] 영상 주소 ${videoRefs.size}건 수집 — Range로 존재 확인`);
-    for (const [videoUrl, ref] of videoRefs) {
-      if (budgetHit('STEP4-2·영상')) { console.log('[SKIP][영상] 시간 예산 초과 — 이후 영상 건너뜀'); break; }
-      const scored = isScoredVideoHost(videoUrl);
+    type VideoProbe = { ok: boolean; status: number; contentType: string; contentRange: string; reason: string; retrySkipped?: 'budget'; recovered?: string };
+    const probeVideo = async (videoUrl: string): Promise<VideoProbe> => {
       // 식별 헤더는 자사 도메인에만 싣는다(제3자 서버 로그에 CI 존재를 남기지 않는다).
       const reqHeaders = isOwnHost(videoUrl) ? ownHeaders : headers;
-      let videoRetrySkipped: 'budget' | undefined;
+      let retrySkipped: 'budget' | undefined;
+      let recovered: string | undefined;
       let probe = await probeFileRange(videoUrl, reqHeaders);
       // 5xx·응답없음(0)만 2초 후 1회 재시도 — 4xx(권한·존재)는 즉시 확정. 설치 파일과 같은 규칙.
       if (probe.status === 0 || probe.status >= 500) {
         const delay = retryDelayMs(1);
         if (!retryBudgetOk(delay, 8000)) {
-          videoRetrySkipped = 'budget';
+          retrySkipped = 'budget';
           probe = { ...probe, note: (probe.note ? probe.note + ' · ' : '') + '재시도 생략(예산 부족)' };
         } else {
-          await page.waitForTimeout(delay);
-          const firstProbe = probe;
+          await new Promise(r => setTimeout(r, delay));
+          const first = probe;
           probe = await probeFileRange(videoUrl, reqHeaders);
-          if (scored && (probe.status === 206 || probe.status === 200)) {
-            intermittentRecoveries.push({ step: 'STEP4-2·영상', type: '영상', lang: [...ref.langs].join(','), url: videoUrl, status: probe.status, responseTime: 0, symptom: `영상 간헐 실패 후 재시도 회복 (최초 ${firstProbe.status === 0 ? '응답 없음' : `HTTP ${firstProbe.status}`})`, timestamp: kstNow(), severity: 'INFO' });
-          }
+          if (probe.status >= 200 && probe.status < 400) recovered = first.status === 0 ? '응답 없음' : `HTTP ${first.status}`;
         }
       }
-      checkedVideoUrls.add(videoUrl);
-
-      const responded = probe.status === 200
+      const redirected = probe.status >= 300 && probe.status < 400;
+      const responded = redirected || probe.status === 200
         || (probe.status === 206 && /^bytes\s+0-0\/\d+/i.test(probe.contentRange));
-      const isVideoType = /^video\//i.test(probe.contentType);
-      const name = videoUrl.split('/').pop() ?? videoUrl;
-      if (responded && isVideoType) {
+      const htmlBody = !redirected && /^text\/html/i.test(probe.contentType);
+      const reason = responded && !htmlBody ? ''
+        : probe.status === 0 ? `접근 불가${probe.note ? ` (${probe.note})` : ''}`
+        : probe.status === 206 && !responded ? `206이지만 Content-Range 형식 이상 ("${probe.contentRange || '(없음)'}")`
+        : !responded ? `HTTP ${probe.status}`
+        : `영상이 아닌 응답 (HTTP ${probe.status}, Content-Type: ${probe.contentType})`;
+      return { ok: reason === '', status: probe.status, contentType: probe.contentType, contentRange: probe.contentRange, reason, retrySkipped, recovered };
+    };
+
+    const allUrls = [...new Set([...videoRefs.values()].flatMap(r => r.sources))];
+    console.log(`[INFO][영상] 영상 ${videoRefs.size}개 · 소스 주소 ${allUrls.length}건 수집 — Range로 존재 확인`);
+    const probes = new Map<string, VideoProbe>();
+    for (let i = 0; i < allUrls.length; i += VIDEO_PROBE_CONCURRENCY) {
+      if (budgetHit('STEP4-2·영상')) { console.log('[SKIP][영상] 시간 예산 초과 — 이후 영상 건너뜀'); break; }
+      const batch = allUrls.slice(i, i + VIDEO_PROBE_CONCURRENCY);
+      const results = await Promise.all(batch.map(probeVideo)); // probeVideo 는 reject 하지 않는다
+      batch.forEach((u, k) => { probes.set(u, results[k]); checkedVideoUrls.add(u); });
+    }
+
+    const reportedDeadSources = new Set<string>();
+    for (const ref of videoRefs.values()) {
+      const got = ref.sources.filter(u => probes.has(u));
+      if (got.length < ref.sources.length) continue; // 예산으로 못 본 소스가 있으면 판정하지 않는다(위에서 축소 기록됨)
+      const langs = [...ref.langs].join(',') || '-';
+      const dead = ref.sources.filter(u => !probes.get(u)!.ok);
+      const alive = ref.sources.filter(u => probes.get(u)!.ok);
+      const nameOf = (u: string) => u.split('/').pop() ?? u;
+      const ts = kstNow();
+
+      for (const u of alive) {
+        const p = probes.get(u)!;
+        if (p.recovered && isScoredVideoHost(u)) {
+          intermittentRecoveries.push({ step: 'STEP4-2·영상', type: '영상', lang: langs, url: u, status: p.status, responseTime: 0, symptom: `영상 간헐 실패 후 재시도 회복 (최초 ${p.recovered})`, timestamp: ts, severity: 'INFO' });
+        }
+      }
+
+      if (dead.length === 0) {
         passCount++;
-        console.log(`[PASS][영상] ${probe.status} ${name}`);
+        console.log(`[PASS][영상] ${ref.sources.map(nameOf).join(' · ')}`);
         continue;
       }
 
-      const ts = kstNow();
-      const langs = [...ref.langs].join(',') || '-';
-      const reason = probe.status === 0 ? `영상 접근 불가${probe.note ? ` (${probe.note})` : ''}`
-        : !responded && probe.status === 206 ? `영상 응답 이상 (206이지만 Content-Range 형식 이상: "${probe.contentRange || '(없음)'}")`
-        : !responded ? `영상 로드 실패 (HTTP ${probe.status})`
-        : `영상 주소가 영상이 아닌 응답을 줌 (Content-Type: ${probe.contentType || '(없음)'})`;
-      const symptom = `${reason} — 참조 언어: ${langs}`;
-      if (!scored) {
-        // 여기 등록되지 않은 호스트의 영상 — 이지랩이 고칠 수 없는 제3자 자원이라 스코어에서 뺀다.
+      if (alive.length > 0) {
+        // 재생되는 소스가 있어 화면은 정상 — 죽은 폴백만 참고 항목으로 남긴다(주소당 1회).
+        passCount++;
+        console.log(`[PASS][영상] ${alive.map(nameOf).join(' · ')} (폴백 누락: ${dead.map(nameOf).join(' · ')})`);
+        for (const u of dead) {
+          if (reportedDeadSources.has(u)) continue;
+          reportedDeadSources.add(u);
+          const p = probes.get(u)!;
+          infoCount++;
+          console.log(`[INFO][영상] ${p.status} [폴백 소스 누락 · 스코어 미반영] ${u}`);
+          await recordIssue({ step: 'STEP4-2·영상', type: '영상', lang: langs, url: u, status: p.status, responseTime: 0,
+                              symptom: `영상 폴백 소스 누락 (${p.reason}) — 다른 소스(${alive.map(nameOf).join(', ')})로 재생됨 · 참조 언어: ${langs}`,
+                              timestamp: ts, severity: 'INFO' });
+        }
+        continue;
+      }
+
+      // 소스 전부 실패 — 화면에 영상이 나오지 않는다.
+      const first = probes.get(dead[0])!;
+      const symptom = `영상 로드 실패 (${first.reason})${dead.length > 1 ? ` · 소스 ${dead.length}건 모두 실패` : ''} — 참조 언어: ${langs}`;
+      if (!dead.some(isScoredVideoHost)) {
+        // 등록되지 않은 호스트의 영상 — 이지랩이 고칠 수 없는 제3자 자원이라 스코어에서 뺀다.
         infoCount++;
-        console.log(`[INFO][영상] ${probe.status} [제3자 호스트 · 스코어 미반영] ${videoUrl}`);
-        await recordIssue({ step: 'STEP4-2·영상', type: '영상', lang: langs, url: videoUrl, status: probe.status, responseTime: 0, symptom, timestamp: ts, severity: 'INFO' });
+        console.log(`[INFO][영상] ${first.status} [제3자 호스트 · 스코어 미반영] ${dead[0]}`);
+        await recordIssue({ step: 'STEP4-2·영상', type: '영상', lang: langs, url: dead[0], status: first.status, responseTime: 0, symptom, timestamp: ts, severity: 'INFO' });
         continue;
       }
       // 영상이 안 떠도 다운로드·로그인 같은 기능은 살아 있다 — 깨진 이미지와 같은 WARN.
       warnCount++;
-      console.log(`[WARN][영상] ${probe.status} ${videoUrl} — ${symptom} @ ${ts}`);
+      console.log(`[WARN][영상] ${first.status} ${dead[0]} — ${symptom} @ ${ts}`);
       await recordIssue({
-        step: 'STEP4-2·영상', type: '영상', lang: langs, url: videoUrl, status: probe.status, responseTime: 0,
-        symptom, timestamp: ts, severity: 'WARN', retrySkipped: videoRetrySkipped,
-        contentType: probe.contentType || undefined,
-        contentRange: probe.contentRange || undefined,
+        step: 'STEP4-2·영상', type: '영상', lang: langs, url: dead[0], status: first.status, responseTime: 0,
+        symptom, timestamp: ts, severity: 'WARN', retrySkipped: dead.map(u => probes.get(u)!.retrySkipped).find(Boolean),
+        contentType: first.contentType || undefined,
+        contentRange: first.contentRange || undefined,
         referencePages: [...ref.pages].sort(),
+        diagnosticDetails: dead.map(u => `${u} · ${probes.get(u)!.reason}`),
       });
     }
   });
@@ -2334,20 +2396,25 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
     // 공지 상세 링크가 4개 언어 모두 점검된 런이 10개 중 2개뿐이었다(2026-10-06).
     // load 를 기다린 뒤 <a> 개수가 LINK_QUIET_MS 동안 그대로면 다 그려진 것으로 본다.
     // networkidle 은 쓰지 않는다 — 광고·분석 태그가 안 끝나면 타임아웃까지 통째로 날린다.
-    const LINK_LOAD_WAIT_MS = 5000; // load 이벤트 대기 상한
-    const LINK_QUIET_MS     = 600;  // 이 시간 동안 개수 변화가 없으면 확정
-    const LINK_SETTLE_MAX   = 4000; // 계속 늘어나는 페이지(무한 스크롤 등)에서도 여기서 끊는다
+    // load 대기와 개수 안정 대기를 합쳐 LINK_SETTLE_MAX 를 넘지 않는다 — load 는 광고 로더·자동재생
+    // 영상에도 묶이므로, 따로 길게 기다리면 제3자가 느린 날 페이지마다 상한을 채워 크롤이 잘린다.
+    const LINK_QUIET_MS   = 600;  // 이 시간 동안 개수 변화가 없으면 확정
+    const LINK_SETTLE_MAX = 4000; // load 대기 포함 전체 상한 (무한 스크롤 등 계속 늘어나는 페이지도 여기서 끊는다)
     async function waitForLinksSettled() {
-      await page.waitForLoadState('load', { timeout: LINK_LOAD_WAIT_MS }).catch(() => {});
       const started = Date.now();
-      let last = -1;
-      let lastChange = Date.now();
-      while (Date.now() - started < LINK_SETTLE_MAX) {
-        const n = await page.locator('a').count();
-        if (n !== last) { last = n; lastChange = Date.now(); }
-        else if (Date.now() - lastChange >= LINK_QUIET_MS) return;
-        await page.waitForTimeout(150);
-      }
+      // 여기서 난 예외(하이드레이션 중 문서 교체 등)는 '덜 기다린 것'일 뿐 렌더 실패가 아니다.
+      // 바깥 catch 로 새면 '크롤 대상 페이지 렌더 실패' WARN 으로 오기록되므로 안에서 끝낸다.
+      try {
+        await page.waitForLoadState('load', { timeout: LINK_SETTLE_MAX - LINK_QUIET_MS }).catch(() => {});
+        let last = -1;
+        let lastChange = Date.now();
+        while (Date.now() - started < LINK_SETTLE_MAX) {
+          const n = await page.locator('a').count();
+          if (n !== last) { last = n; lastChange = Date.now(); }
+          else if (Date.now() - lastChange >= LINK_QUIET_MS) return;
+          await page.waitForTimeout(150);
+        }
+      } catch { /* 지금까지 그려진 링크로 진행 */ }
     }
     // 언어 접두어 없는 링크(/tool/ezcapture)는 전부 /ko/... 로 307 된다. 예전엔 이 7개를 언어마다
     // 다시 렌더해 같은 화면의 링크를 4번씩 훑었다(런당 28회). 도착 주소가 이미 훑은 페이지면
@@ -2409,14 +2476,15 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
 
           const internalToFollow: string[] = [];
           try {
-            const links = await page.locator('a').all();
-            console.log(`[INFO][${lang}][depth${depth}] ${pageUrl} → ${links.length}개 링크 발견`);
+            // href 는 한 번에 읽는다. 링크마다 getAttribute 를 부르면 런당 3천 번 넘게 브라우저를 왕복하고,
+            // 순회 도중 DOM 이 바뀌면 남은 링크를 통째로 놓친다(링크수집예외).
+            const hrefs = await page.locator('a').evaluateAll(els => els.map(e => e.getAttribute('href')));
+            console.log(`[INFO][${lang}][depth${depth}] ${pageUrl} → ${hrefs.length}개 링크 발견`);
 
-            for (const link of links) {
+            for (const rawUrl of hrefs) {
               // 링크 단위로도 예산 확인 — 링크가 많은 페이지에서 데드라인을 넘겨도
               // 페이지 진입 시점 체크만으론 못 멈추므로 여기서 끊는다.
               if (outOfBudget()) { crawlTruncated = true; break; }
-              const rawUrl = await link.getAttribute('href');
               if (!rawUrl || rawUrl.startsWith('#') || rawUrl.startsWith('javascript:') || rawUrl.startsWith('mailto:')) continue;
               if (/\.(exe|apk|zip|dmg|msi|pkg)$/i.test(rawUrl)) continue; // 다운로드 파일 스킵
 
@@ -2829,6 +2897,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
     step4Stats,
     // 제품 플랫폼 정책으로 건너뛴 검사 — PASS 가 아니라 '검사 대상 아님'이다.
     policySkips,
+    videosChecked: checkedVideoUrls.size,
     // 증거 없는 FAIL·WARN 이 0건이어야 한다(INFO 외부 링크는 대상 아님).
     evidenceMissing: failRecords.filter(f => f.severity !== 'INFO' && !f.evidencePath).length,
     // own/third 는 '브라우저가 낸 요청'만 센다(page.request·raw https·TLS 제외).
