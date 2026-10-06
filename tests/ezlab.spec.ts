@@ -50,25 +50,26 @@ function probeFileRange(
   url: string,
   headers: Record<string, string>,
   timeoutMs = 8000,
-): Promise<{ status: number; contentRange: string; bytes: number; note: string }> {
+): Promise<{ status: number; contentRange: string; contentType: string; bytes: number; note: string }> {
   return new Promise(resolve => {
     let settled = false;
-    const done = (r: { status: number; contentRange: string; bytes: number; note: string }) => {
-      if (!settled) { settled = true; resolve(r); }
+    const done = (r: { status: number; contentRange: string; contentType?: string; bytes: number; note: string }) => {
+      if (!settled) { settled = true; resolve({ contentType: '', ...r }); }
     };
     const req = https.get(url, { headers: { ...headers, Range: 'bytes=0-0' } }, res => {
       const status = res.statusCode ?? 0;
       const contentRange = String(res.headers['content-range'] ?? '');
+      const contentType = String(res.headers['content-type'] ?? '');
       if (status !== 206) {
         // Range 무시(200) 또는 오류 — 본문을 받기 전에 끊는다. 전체 다운로드 방지의 핵심.
         req.destroy();
-        done({ status, contentRange, bytes: 0, note: status === 200 ? 'Range 무시(전체 응답) — 연결 중단' : '' });
+        done({ status, contentRange, contentType, bytes: 0, note: status === 200 ? 'Range 무시(전체 응답) — 연결 중단' : '' });
         return;
       }
       let bytes = 0;
       res.on('data', (c: Buffer) => { bytes += c.length; if (bytes > 4096) req.destroy(); });
-      res.on('end',   () => done({ status, contentRange, bytes, note: '' }));
-      res.on('error', () => done({ status, contentRange, bytes, note: '' }));
+      res.on('end',   () => done({ status, contentRange, contentType, bytes, note: '' }));
+      res.on('error', () => done({ status, contentRange, contentType, bytes, note: '' }));
     });
     req.on('error', () => done({ status: 0, contentRange: '', bytes: 0, note: '연결 실패' }));
     req.setTimeout(timeoutMs, () => { req.destroy(); done({ status: 0, contentRange: '', bytes: 0, note: '타임아웃' }); });
@@ -185,19 +186,44 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   // 점검 범위 수치가 실제 페이지 수를 뜻하지 않게 된다. (ezlab / ezdown 이미지 공통 사용)
   const checkedImageUrls = new Set<string>();
 
+  // ── 영상 참조 (메인 히어로 필름 · 도구별 소개 영상) ─────────────
+  // 이미지 검사는 resourceType 'image' 만 봐서 <video> 는 통째로 빠져 있었다. 재생 품질은
+  // 자동화로 판단할 수 없으므로 '주소가 살아 있고 영상 파일로 응답하는지'까지만 본다.
+  // 수집은 이미 하는 방문(STEP5 메인 · STEP4 도구 페이지)의 DOM 에서만 한다 — 추가 렌더 없음.
+  const videoRefs = new Map<string, { langs: Set<string>; pages: Set<string> }>();
+  const checkedVideoUrls = new Set<string>();
+  // 영상은 회사 CDN(cdn.mobsoft.net)에 있다. OWN_HOST_RE 를 넓히면 식별 헤더·비콘 정책까지 바뀌므로
+  // 영상 판정에만 쓰는 목록을 따로 둔다. 여기 없는 호스트의 영상은 제3자 자원이라 INFO 로만 남긴다.
+  const VIDEO_ASSET_HOST_RE = /^([a-z0-9-]+\.)*mobsoft\.net$/i;
+  const isScoredVideoHost = (u: string) => {
+    try { return isOwnHost(u) || VIDEO_ASSET_HOST_RE.test(new URL(u).hostname); } catch { return false; }
+  };
+  async function collectVideoRefs(lang: string, pageUrl: string) {
+    try {
+      // <video src> 와 <source src> 둘 다 — 사이트는 webm·mp4 를 <source> 로 나란히 싣는다.
+      const srcs = await page.locator('video[src], video source[src]').evaluateAll(
+        els => els.map(e => (e as HTMLVideoElement | HTMLSourceElement).src).filter(Boolean),
+      );
+      for (const src of srcs) {
+        if (!/^https?:\/\//i.test(src)) continue; // blob:·data: 는 주소 검증 대상이 아니다
+        const url = src.split('#')[0];
+        const ref = videoRefs.get(url) ?? { langs: new Set<string>(), pages: new Set<string>() };
+        ref.langs.add(lang);
+        ref.pages.add(pageUrl);
+        videoRefs.set(url, ref);
+      }
+    } catch { /* 수집 실패는 영상 검사 범위만 줄인다 — 이 방문의 본래 판정을 깨지 않는다 */ }
+  }
+
   // ── 서비스 도구 페이지 (STEP 3 크롤링에서 자동 수집) ────────────
   // ── 제품 배포 플랫폼 정책 ────────────────────────────────────────
   // 웹 헬스체크는 데스크톱 설치 파일과 다운로드 버튼을 검증한다. 모바일 전용 제품에는
   // 애초에 해당 검사가 성립하지 않으므로 '실패'가 아니라 '검사 대상 아님'이다.
   // HTTP 403 이나 .exe 확장자 같은 '증상'으로 일괄 무시하면 진짜 장애까지 가려지므로,
   // 반드시 제품 단위 정책으로만 분기한다. 여기 없는 제품은 전부 데스크톱으로 본다.
-  const MOBILE_ONLY_PRODUCTS: { pattern: RegExp; product: string; reason: string }[] = [
-    {
-      pattern: /\/tool\/ezdown(\/|$)/i,
-      product: '이지다운',
-      reason: '모바일 전용 앱(Google Play 배포) — 데스크톱 설치 파일·다운로드 버튼 검증 대상 아님',
-    },
-  ];
+  // 현재 해당 제품 없음. 이지다운은 2026-09-30 윈도우 설치 파일(ezDown_Setup_home.exe)이 배포돼
+  // 데스크톱 제품이 됐다 — 목록에 남겨두면 그 파일과 다운로드 버튼이 깨져도 SKIP 으로 가려진다.
+  const MOBILE_ONLY_PRODUCTS: { pattern: RegExp; product: string; reason: string }[] = [];
   const mobileOnly = (url: string) => MOBILE_ONLY_PRODUCTS.find(p => p.pattern.test(url));
   // 정책으로 건너뛴 항목 — PASS 로 올리지 않고 별도로 남긴다(스코어·판정에 영향 없음).
   const policySkips: { step: string; product: string; url: string; reason: string }[] = [];
@@ -1488,6 +1514,8 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
             await verifyImage(displayUrl, fetchUrl, 'meta');
           }
 
+          await collectVideoRefs(lang, targetUrl);
+
           // 도구 페이지 URL 수집 — 추가 렌더 없이 이 방문의 DOM에서 그대로 뽑는다.
           // 예전엔 STEP3 크롤이 채워서 STEP4가 크롤 완주에 묶여 있었다. 크롤이 잘리면
           // 다운로드 점검이 통째로 날아가므로, 핵심 검사를 크롤보다 앞에 둘 수 있게 여기서 모은다.
@@ -2168,6 +2196,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
           // 페이지 생존(status) 검사는 그대로 두고, 버튼 검사만 건너뛴다.
           const mobilePolicy = mobileOnly(target.url);
           let hasDownloadLink = false;
+          if (status === 200) await collectVideoRefs(tlang, target.url);
           if (status === 200 && !mobilePolicy) {
             const dlLinks = await page.locator('a[href*=".exe"], a[href*=".apk"], a[href*=".zip"], a[href*="download"]').all();
             // 다운로드 CTA가 언어별로 <button>/<a>가 아니라 btn-class <div> 등으로 렌더되는 경우가 있어
@@ -2216,6 +2245,77 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   });
 
   // ══════════════════════════════════════════════════════════════════
+  // STEP 4-2: 영상 주소 확인 (메인 히어로 필름 · 도구별 소개 영상)
+  // ══════════════════════════════════════════════════════════════════
+  // STEP5·STEP4 방문에서 모은 <video>/<source> 주소를 Range 1바이트로 확인한다.
+  // 영상은 수 MB~수십 MB 라 본문을 받지 않는다 — 설치 파일과 같은 스트리밍 프로브를 쓴다.
+  // 정상 = 206(+Content-Range) 또는 200, 그리고 Content-Type 이 video/*.
+  // CDN 이 없는 파일에 오류 HTML 을 200 으로 주는 경우를 타입 검사로 거른다.
+  stepMark('STEP 4-2');
+  await test.step('STEP 4-2 · 영상 주소 확인', async () => {
+    console.log(`[INFO][영상] 영상 주소 ${videoRefs.size}건 수집 — Range로 존재 확인`);
+    for (const [videoUrl, ref] of videoRefs) {
+      if (budgetHit('STEP4-2·영상')) { console.log('[SKIP][영상] 시간 예산 초과 — 이후 영상 건너뜀'); break; }
+      const scored = isScoredVideoHost(videoUrl);
+      // 식별 헤더는 자사 도메인에만 싣는다(제3자 서버 로그에 CI 존재를 남기지 않는다).
+      const reqHeaders = isOwnHost(videoUrl) ? ownHeaders : headers;
+      let videoRetrySkipped: 'budget' | undefined;
+      let probe = await probeFileRange(videoUrl, reqHeaders);
+      // 5xx·응답없음(0)만 2초 후 1회 재시도 — 4xx(권한·존재)는 즉시 확정. 설치 파일과 같은 규칙.
+      if (probe.status === 0 || probe.status >= 500) {
+        const delay = retryDelayMs(1);
+        if (!retryBudgetOk(delay, 8000)) {
+          videoRetrySkipped = 'budget';
+          probe = { ...probe, note: (probe.note ? probe.note + ' · ' : '') + '재시도 생략(예산 부족)' };
+        } else {
+          await page.waitForTimeout(delay);
+          const firstProbe = probe;
+          probe = await probeFileRange(videoUrl, reqHeaders);
+          if (scored && (probe.status === 206 || probe.status === 200)) {
+            intermittentRecoveries.push({ step: 'STEP4-2·영상', type: '영상', lang: [...ref.langs].join(','), url: videoUrl, status: probe.status, responseTime: 0, symptom: `영상 간헐 실패 후 재시도 회복 (최초 ${firstProbe.status === 0 ? '응답 없음' : `HTTP ${firstProbe.status}`})`, timestamp: kstNow(), severity: 'INFO' });
+          }
+        }
+      }
+      checkedVideoUrls.add(videoUrl);
+
+      const responded = probe.status === 200
+        || (probe.status === 206 && /^bytes\s+0-0\/\d+/i.test(probe.contentRange));
+      const isVideoType = /^video\//i.test(probe.contentType);
+      const name = videoUrl.split('/').pop() ?? videoUrl;
+      if (responded && isVideoType) {
+        passCount++;
+        console.log(`[PASS][영상] ${probe.status} ${name}`);
+        continue;
+      }
+
+      const ts = kstNow();
+      const langs = [...ref.langs].join(',') || '-';
+      const reason = probe.status === 0 ? `영상 접근 불가${probe.note ? ` (${probe.note})` : ''}`
+        : !responded && probe.status === 206 ? `영상 응답 이상 (206이지만 Content-Range 형식 이상: "${probe.contentRange || '(없음)'}")`
+        : !responded ? `영상 로드 실패 (HTTP ${probe.status})`
+        : `영상 주소가 영상이 아닌 응답을 줌 (Content-Type: ${probe.contentType || '(없음)'})`;
+      const symptom = `${reason} — 참조 언어: ${langs}`;
+      if (!scored) {
+        // 여기 등록되지 않은 호스트의 영상 — 이지랩이 고칠 수 없는 제3자 자원이라 스코어에서 뺀다.
+        infoCount++;
+        console.log(`[INFO][영상] ${probe.status} [제3자 호스트 · 스코어 미반영] ${videoUrl}`);
+        await recordIssue({ step: 'STEP4-2·영상', type: '영상', lang: langs, url: videoUrl, status: probe.status, responseTime: 0, symptom, timestamp: ts, severity: 'INFO' });
+        continue;
+      }
+      // 영상이 안 떠도 다운로드·로그인 같은 기능은 살아 있다 — 깨진 이미지와 같은 WARN.
+      warnCount++;
+      console.log(`[WARN][영상] ${probe.status} ${videoUrl} — ${symptom} @ ${ts}`);
+      await recordIssue({
+        step: 'STEP4-2·영상', type: '영상', lang: langs, url: videoUrl, status: probe.status, responseTime: 0,
+        symptom, timestamp: ts, severity: 'WARN', retrySkipped: videoRetrySkipped,
+        contentType: probe.contentType || undefined,
+        contentRange: probe.contentRange || undefined,
+        referencePages: [...ref.pages].sort(),
+      });
+    }
+  });
+
+  // ══════════════════════════════════════════════════════════════════
   // STEP 3: UI 링크 전수조사 (내부/외부 분리)
   // ══════════════════════════════════════════════════════════════════
   stepMark('STEP 3');
@@ -2227,6 +2327,34 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
     // 렌더 실패 · 링크 수집 예외 · term 페이지 진입 실패. 예전엔 WARN만 남기거나(앞 둘)
     // 조용히 SKIP 해서(term), 실제로 링크를 놓쳤는데도 coverageComplete=true 가 됐다.
     const crawlIncomplete = new Set<string>();
+
+    // ── 링크 수집 전 렌더 대기 ──
+    // 예전엔 domcontentloaded + 0.5초 뒤에 바로 <a> 를 셌다. 그런데 목록·본문 링크는 하이드레이션
+    // 뒤에 그려져서(실측: load 이벤트 0.1~0.3초 뒤), 같은 페이지가 런마다 11개 또는 55개로 잡혔다.
+    // 공지 상세 링크가 4개 언어 모두 점검된 런이 10개 중 2개뿐이었다(2026-10-06).
+    // load 를 기다린 뒤 <a> 개수가 LINK_QUIET_MS 동안 그대로면 다 그려진 것으로 본다.
+    // networkidle 은 쓰지 않는다 — 광고·분석 태그가 안 끝나면 타임아웃까지 통째로 날린다.
+    const LINK_LOAD_WAIT_MS = 5000; // load 이벤트 대기 상한
+    const LINK_QUIET_MS     = 600;  // 이 시간 동안 개수 변화가 없으면 확정
+    const LINK_SETTLE_MAX   = 4000; // 계속 늘어나는 페이지(무한 스크롤 등)에서도 여기서 끊는다
+    async function waitForLinksSettled() {
+      await page.waitForLoadState('load', { timeout: LINK_LOAD_WAIT_MS }).catch(() => {});
+      const started = Date.now();
+      let last = -1;
+      let lastChange = Date.now();
+      while (Date.now() - started < LINK_SETTLE_MAX) {
+        const n = await page.locator('a').count();
+        if (n !== last) { last = n; lastChange = Date.now(); }
+        else if (Date.now() - lastChange >= LINK_QUIET_MS) return;
+        await page.waitForTimeout(150);
+      }
+    }
+    // 언어 접두어 없는 링크(/tool/ezcapture)는 전부 /ko/... 로 307 된다. 예전엔 이 7개를 언어마다
+    // 다시 렌더해 같은 화면의 링크를 4번씩 훑었다(런당 28회). 도착 주소가 이미 훑은 페이지면
+    // 링크 수집을 건너뛴다 — 링크 자체의 응답 확인(checkUrl)은 그대로 한다.
+    const linkScannedPages = new Set<string>();
+    const pageKey = (u: string) => u.split('#')[0].split('?')[0].replace(/\/$/, '');
+
     for (const lang of languages) {
       await test.step(`[${lang}] <a> 링크 수집 및 점검 (depth 2)`, async () => {
         const crawledPages = new Set<string>();
@@ -2255,8 +2383,14 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
               intermittentRecoveries.push({ step: 'STEP3·크롤', type: '크롤', lang, url: cleanUrl, status: 200, responseTime: 0, symptom: '크롤 네비 간헐 실패 후 재시도 회복 (2회 시도)', timestamp: kstNow(), severity: 'INFO' });
             }
             crawlStats.pagesCompleted++;
+            const landed = pageKey(page.url());
+            if (landed !== pageKey(pageUrl) && linkScannedPages.has(landed)) {
+              console.log(`[INFO][${lang}][depth${depth}] ${pageUrl} → ${landed} 로 이동, 이미 훑은 페이지 — 링크 수집 생략`);
+              return;
+            }
+            linkScannedPages.add(landed);
             await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-            await page.waitForTimeout(500);
+            await waitForLinksSettled();
           } catch {
             // 기존엔 로그만 남기고 조용히 빠졌다. 그러면 진입점(depth 0)이 실패했을 때
             // 그 언어의 크롤이 통째로 사라지는데 카운터·리포트엔 흔적이 없어(미탐),
@@ -2510,6 +2644,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
     '[점검 범위]',
     `  페이지 / 링크 : ${visitedUrls.size}개`,
     `  이미지        : ${checkedImageUrls.size}개`,
+    `  영상          : ${checkedVideoUrls.size}개`,
     `  API           : ${apiRecords.length}개`,
     sep2,
     '[STEP별 상태]',
@@ -2517,6 +2652,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
     `  STEP 2 · API 자동 수집 및 검증 (${apiRecords.length}건)`,
     `  STEP 3 · UI 링크 전수조사`,
     `  STEP 4 · 다운로드 페이지 + 실제 파일 URL 검증`,
+    `  STEP 4-2 · 영상 주소 확인`,
     `  STEP 5 · 언어별 핵심 콘텐츠 무결성 확인`,
     `  STEP 6 · 깨진 이미지 감지`,
     `  STEP 7 · 언어별 로그인 버튼 렌더링 확인`,
@@ -2575,6 +2711,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
         r.type === '파일'    ? '파일 서버 / CDN 확인' :
         r.type === '콘텐츠'  ? '프론트엔드 배포 확인' :
         r.type === '이미지'  ? '이미지 서버 / CDN 확인' :
+        r.type === '영상'    ? '영상 파일 / CDN 확인 (메인 히어로 · 도구 소개 영상)' :
         r.type === '로그인'  ? '로그인 페이지 렌더링 확인' :
         r.type === '이지다운' ? '이지다운 사이트(ezdown.kr) 확인' :
         r.type === '외부링크' ? '외부 서비스 상태 — 이지랩 장애 아님 (링크 유효성만 확인)' :
@@ -2721,6 +2858,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   console.log(`  점검 완주: ${truncatedSteps.size === 0 ? '예' : `아니오 (미점검: ${[...truncatedSteps].join(', ')})`}`);
   console.log(`  페이지/링크: ${visitedUrls.size}개`);
   console.log(`  이미지: ${checkedImageUrls.size}개`);
+  console.log(`  영상: ${checkedVideoUrls.size}개`);
   console.log(`  API: ${apiRecords.length}개`);
   console.log(`  결과: PASS ${passCount} / FAIL ${failCount} / WARN ${warnCount} / SLOW ${slowCount} / INFO ${infoCount} / TOTAL ${totalCount}`);
   console.log(`  상태: ${status}`);

@@ -622,8 +622,10 @@ test.describe('STEP2 API 관측자', () => {
 // HTTP 403 이나 .exe 확장자 같은 증상으로 일괄 무시하면 진짜 장애까지 가려지므로
 // 반드시 제품 단위 정책으로만 분기한다.
 test.describe('제품 배포 플랫폼 정책', () => {
+  // 운영 목록(ezlab.spec.ts 의 MOBILE_ONLY_PRODUCTS)은 지금 비어 있다 — 이지다운이 2026-09-30
+  // 윈도우 설치 파일을 배포하면서 빠졌다. 정책 분기 자체는 남아 있으므로 가상의 제품으로 규칙을 고정한다.
   const MOBILE_ONLY = [
-    { pattern: /\/tool\/ezdown(\/|$)/i, product: '이지다운',
+    { pattern: /\/tool\/ezmobile(\/|$)/i, product: '모바일 전용 예시',
       reason: '모바일 전용 앱(Google Play 배포) — 데스크톱 설치 파일·다운로드 버튼 검증 대상 아님' },
   ];
   const mobileOnly = (url: string) => MOBILE_ONLY.find(p => p.pattern.test(url));
@@ -643,14 +645,20 @@ test.describe('제품 배포 플랫폼 정책', () => {
   const C = 'https://cdn.ezlab.im/tool';
   const P = 'https://ezlab.im/ko/tool';
 
-  test('이지다운의 .exe 403 → FAIL 아님, 정책 SKIP', () => {
-    expect(gradeInstaller(`${C}/ezdown/ezDown_Setup_home.exe`, 403)).toBe('SKIP');
-    expect(gradeInstaller(`${C}/ezdown/ezDown_Setup_home.exe`, 403)).not.toBe('FAIL');
+  test('모바일 전용 제품의 .exe 403 → FAIL 아님, 정책 SKIP', () => {
+    expect(gradeInstaller(`${C}/ezmobile/ezMobile_Setup_home.exe`, 403)).toBe('SKIP');
+    expect(gradeInstaller(`${C}/ezmobile/ezMobile_Setup_home.exe`, 403)).not.toBe('FAIL');
   });
 
-  test('이지다운 다운로드 버튼 없음 → WARN 아님, 정책 SKIP', () => {
-    expect(gradeButton(`${P}/ezdown`, 200, false)).toBe('SKIP');
-    expect(gradeButton(`${P}/ezdown`, 200, false)).not.toBe('WARN');
+  test('모바일 전용 제품 다운로드 버튼 없음 → WARN 아님, 정책 SKIP', () => {
+    expect(gradeButton(`${P}/ezmobile`, 200, false)).toBe('SKIP');
+    expect(gradeButton(`${P}/ezmobile`, 200, false)).not.toBe('WARN');
+  });
+
+  test('이지다운은 데스크톱 제품 — .exe 403 은 FAIL, 버튼 없음은 WARN', () => {
+    expect(gradeInstaller(`${C}/ezdown/ezDown_Setup_home.exe`, 403)).toBe('FAIL');
+    expect(gradeInstaller(`${C}/ezdown/ezDown_Setup_home.exe`, 200)).toBe('PASS');
+    expect(gradeButton(`${P}/ezdown`, 200, false)).toBe('WARN');
   });
 
   test('다른 데스크톱 제품의 .exe 403 → 기존대로 FAIL', () => {
