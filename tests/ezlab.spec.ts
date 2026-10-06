@@ -2271,7 +2271,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   // 영상은 수 MB~수십 MB 라 본문을 받지 않는다 — 설치 파일과 같은 스트리밍 프로브를 쓴다.
   // 주소 정상 = 3xx · 200 · 206(+Content-Range). 단 2xx 인데 text/html 이면 CDN 이 없는 파일에
   // 오류 페이지를 준 것이라 실패로 본다(octet-stream 같은 느슨한 타입은 재생되므로 통과).
-  // 등급: 요소의 소스가 전부 죽음 → WARN(화면에 영상 없음) · 일부만 죽음 → INFO(폴백 누락, 화면은 정상).
+  // 등급: 요소의 소스가 전부 죽음 → WARN(화면에 영상 없음) · 일부만 죽음 → 통과(폴백 누락은 로그에만).
   const VIDEO_PROBE_CONCURRENCY = 6; // 65건 안팎을 직렬로 돌면 14초 — 예산(510초) 여유를 위해 묶어서 보낸다
   stepMark('STEP 4-2');
   await test.step('STEP 4-2 · 영상 주소 확인', async () => {
@@ -2317,7 +2317,6 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
       batch.forEach((u, k) => { probes.set(u, results[k]); checkedVideoUrls.add(u); });
     }
 
-    const reportedDeadSources = new Set<string>();
     for (const ref of videoRefs.values()) {
       const got = ref.sources.filter(u => probes.has(u));
       if (got.length < ref.sources.length) continue; // 예산으로 못 본 소스가 있으면 판정하지 않는다(위에서 축소 기록됨)
@@ -2341,19 +2340,11 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
       }
 
       if (alive.length > 0) {
-        // 재생되는 소스가 있어 화면은 정상 — 죽은 폴백만 참고 항목으로 남긴다(주소당 1회).
+        // 재생되는 소스가 있어 화면은 정상이다. 죽은 폴백은 리포트에 올리지 않고 로그에만 남긴다 —
+        // 운영에 mp4 폴백 12건이 없는데(webm 으로 재생됨) INFO 로 올렸더니 매 런 failures 20건 상한의
+        // 절반을 차지했고, 30분마다 되풀이해 보여줄 내용도 아니었다.
         passCount++;
-        console.log(`[PASS][영상] ${alive.map(nameOf).join(' · ')} (폴백 누락: ${dead.map(nameOf).join(' · ')})`);
-        for (const u of dead) {
-          if (reportedDeadSources.has(u)) continue;
-          reportedDeadSources.add(u);
-          const p = probes.get(u)!;
-          infoCount++;
-          console.log(`[INFO][영상] ${p.status} [폴백 소스 누락 · 스코어 미반영] ${u}`);
-          await recordIssue({ step: 'STEP4-2·영상', type: '영상', lang: langs, url: u, status: p.status, responseTime: 0,
-                              symptom: `영상 폴백 소스 누락 (${p.reason}) — 다른 소스(${alive.map(nameOf).join(', ')})로 재생됨 · 참조 언어: ${langs}`,
-                              timestamp: ts, severity: 'INFO' });
-        }
+        console.log(`[PASS][영상] ${alive.map(nameOf).join(' · ')} (폴백 누락: ${dead.map(u => `${nameOf(u)} ${probes.get(u)!.reason}`).join(' · ')})`);
         continue;
       }
 
