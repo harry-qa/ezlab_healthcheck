@@ -191,6 +191,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   const errorKeywords = ['점검중', '서비스 준비중'];
   const languages = ['ko', 'en', 'jp', 'tw'];
   const visitedUrls = new Set<string>();
+  // 내부 링크가 200 으로 끝난 리다이렉트의 도착 주소(checkUrl 이 채운다). 크롤이 '이미 훑은 페이지로
+  // 가는 링크'를 렌더하기 전에 알아보는 데 쓴다.
+  const redirectTargets = new Map<string, string>();
   // 이미지는 링크와 별도 집계 — 같은 Set에 넣으면 '페이지/링크 N개'에 이미지 수백 개가 섞여
   // 점검 범위 수치가 실제 페이지 수를 뜻하지 않게 된다. (ezlab / ezdown 이미지 공통 사용)
   const checkedImageUrls = new Set<string>();
@@ -751,6 +754,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
       // 요청한 URL(외부 링크는 쿼리 포함 원본)과 비교 — cleanUrl과 비교하면 쿼리가 있는
       // 외부 링크가 리다이렉트 없이도 전부 [REDIRECT]로 오표기된다.
       const isRedirect = finalUrl !== requestUrl;
+      if (isInternal && isRedirect && status === 200) redirectTargets.set(cleanUrl, finalUrl);
 
       let contentIssue = '';
       // 콘텐츠(점검중) 스캔은 내부 링크에만 적용한다. 외부 링크는 이지랩 소유가 아니라 정책상 WARN까지만인데,
@@ -2419,6 +2423,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
     // 언어 접두어 없는 링크(/tool/ezcapture)는 전부 /ko/... 로 307 된다. 예전엔 이 7개를 언어마다
     // 다시 렌더해 같은 화면의 링크를 4번씩 훑었다(런당 28회). 도착 주소가 이미 훑은 페이지면
     // 링크 수집을 건너뛴다 — 링크 자체의 응답 확인(checkUrl)은 그대로 한다.
+    // 도착 주소는 checkUrl 이 본 값(redirectTargets)으로 렌더 전에 판단하고, 거기 없으면 렌더 뒤 주소로 한 번 더 본다.
     const linkScannedPages = new Set<string>();
     const pageKey = (u: string) => u.split('#')[0].split('?')[0].replace(/\/$/, '');
 
@@ -2434,6 +2439,12 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
           const cleanUrl = pageUrl.split('?')[0];
           if (crawledPages.has(cleanUrl)) return;
           crawledPages.add(cleanUrl);
+          // 응답 확인(checkUrl) 때 본 도착 주소가 이미 훑은 페이지면 렌더 자체를 하지 않는다.
+          const knownTarget = redirectTargets.get(cleanUrl);
+          if (knownTarget && linkScannedPages.has(pageKey(knownTarget))) {
+            console.log(`[INFO][${lang}][depth${depth}] ${pageUrl} → ${pageKey(knownTarget)} 로 리다이렉트, 이미 훑은 페이지 — 링크 수집 생략`);
+            return;
+          }
 
           let navAttempts = 1;
           let navRetrySkipped: 'budget' | undefined;
