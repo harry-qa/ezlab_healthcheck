@@ -5,6 +5,9 @@ name: Slack 연동 테스트
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read   # 체크아웃만 한다
+
 jobs:
   slack-test:
     runs-on: ubuntu-latest

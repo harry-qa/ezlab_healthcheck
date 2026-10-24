@@ -15,8 +15,7 @@ on:
         default: manual
 
 permissions:
-  contents: write
-  pages: write
+  contents: write   # gh-pages 배포(JamesIves) — Pages 는 브랜치 배포라 pages: write 는 쓰지 않는다
   issues: write
   actions: read   # 파이프라인 실패 알림이 직전 런들의 결과를 읽어 반복 알림을 줄인다
 
