@@ -104,8 +104,11 @@ def previous_consecutive_failures(env=os.environ):
 
 
 def should_send(prev_fails):
-    """연속 실패의 첫 회, 그리고 그 뒤 REPEAT_EVERY 회마다."""
-    return prev_fails == 0 or (prev_fails + 1) % REPEAT_EVERY == 0
+    """연속 실패의 첫 회, 그리고 그 뒤 REPEAT_EVERY 회마다(기본 1·7·13회째 — 사이트 알림 should_repeat 과 같은 간격).
+
+    예전 식 (prev_fails + 1) % REPEAT_EVERY 는 1·6·12회째라 첫 재알림만 5회 만에 나갔다.
+    """
+    return prev_fails % REPEAT_EVERY == 0
 
 # 환경변수 이름 → 사람이 읽는 단계 이름 (워크플로 순서대로)
 STEP_LABELS = [

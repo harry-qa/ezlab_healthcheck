@@ -138,7 +138,10 @@ jobs:
           # 지문을 안 보면 서로 다른 단발 오류 A→B 도 '연속 2회'가 돼 이슈가 생성된다.
           # update_failures.py 뒤에서 계산해야 notify_slack.py 가 보는 이력과 동일해진다.
           # UNKNOWN(테스트 미완주=인프라 이상)은 별도 즉시 알림 경로가 있어 사이트 장애 스트릭에 섞지 않는다.
-          FAIL_STREAK=$(python3 scripts/fail_streak.py "$CURRENT_STATUS" "$DATETIME" "$RECENT_STATUSES" 2>/dev/null || echo 0)
+          # 실패하면 0 으로 두되 원인은 로그와 Actions 요약에 남긴다 — 예전엔 2>/dev/null 로 삼켜
+          # 스크립트가 깨져도 이슈 생성이 '연속 0회'로 조용히 빠졌다.
+          FAIL_STREAK=$(python3 scripts/fail_streak.py "$CURRENT_STATUS" "$DATETIME" "$RECENT_STATUSES") \
+            || { echo "::warning title=연속 실패 계산 실패::fail_streak.py 오류 — 이번 런은 이슈 생성 판정을 0으로 둡니다"; FAIL_STREAK=0; }
           echo "FAIL_STREAK=$FAIL_STREAK" >> $GITHUB_ENV
 
           cp /tmp/statuses.json reports/statuses.json
@@ -207,13 +210,18 @@ jobs:
           # GitHub 이슈 검색은 한글(CJK) 토크나이즈가 불안정해, 열린 이슈가 있는데도 검색이
           # 빈 결과를 주면 30분마다 새 이슈가 생성되는 스팸이 났다 → 라벨 기반은 결정적으로 매칭된다.
           gh label create "$ISSUE_LABEL" --color B60205 --description "이지랩 헬스체크 자동 감지 장애" 2>/dev/null || true
-          EXISTING=$(gh issue list --state open --label "$ISSUE_LABEL" --json number --jq '.[0].number' 2>/dev/null || echo "")
+          # 조회·코멘트·생성 실패는 런을 멈추지 않되 원인(stderr)은 로그에 남긴다 — 예전엔 2>/dev/null 로
+          # 권한·API 오류가 흔적 없이 사라져 '이슈가 왜 안 생겼는지' 알 수 없었다.
+          EXISTING=$(gh issue list --state open --label "$ISSUE_LABEL" --json number --jq '.[0].number') \
+            || { echo "::warning title=이슈 조회 실패::열린 장애 이슈를 조회하지 못했습니다 — 새 이슈 생성으로 진행"; EXISTING=""; }
           if [ -n "$EXISTING" ]; then
-            gh issue comment "$EXISTING" --body "🔁 장애 지속 감지 — $FAIL_TIME ([실행 로그]($REPORT_URL) · [대시보드]($PAGES_URL))" 2>/dev/null || true
+            gh issue comment "$EXISTING" --body "🔁 장애 지속 감지 — $FAIL_TIME ([실행 로그]($REPORT_URL) · [대시보드]($PAGES_URL))" \
+              || echo "::warning title=이슈 코멘트 실패::#$EXISTING 에 코멘트를 달지 못했습니다"
             echo "기존 이슈 #$EXISTING 에 코멘트 추가 (중복 생성 방지)"
           else
             BODY=$(printf "## 이지랩 헬스체크 실패\n\n**감지 시각:** %s\n\n### 리포트 확인\n- [GitHub Actions 실행 로그](%s)\n- [헬스체크 리포트 페이지](%s)\n\n> 자동 생성된 이슈입니다. 서비스 복구 후 직접 닫아주세요." "$FAIL_TIME" "$REPORT_URL" "$PAGES_URL")
-            gh issue create --title "🚨 헬스체크 실패 감지 - $FAIL_TIME" --body "$BODY" --label "$ISSUE_LABEL" 2>/dev/null || true
+            gh issue create --title "🚨 헬스체크 실패 감지 - $FAIL_TIME" --body "$BODY" --label "$ISSUE_LABEL" \
+              || echo "::warning title=이슈 생성 실패::장애 이슈를 만들지 못했습니다 — 실행 로그의 gh 오류를 확인하세요"
           fi
 
       # 헬스체크 '파이프라인 자체'가 깨졌을 때의 알림. 위 사이트 알림은 리포트 저장 단계가

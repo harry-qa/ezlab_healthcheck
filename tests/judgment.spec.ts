@@ -45,11 +45,19 @@ function judgeImage(status: number, contentType: string, contentRange: string, b
 }
 
 /** 설치 파일 Range 프로브 판정 (본체 STEP4-1 과 동일 규칙) */
-function judgeFileProbe(probe: { status: number; contentRange: string; bytes: number; note: string }) {
+function judgeFileProbe(probe: { status: number; contentRange: string; bytes: number; note: string; contentType?: string }) {
   const rangeOk = /^bytes\s+0-0\/\d+/i.test(probe.contentRange);
   if (probe.status === 206 && rangeOk && probe.bytes === 1) return { status: 206, pass: true };
   if (probe.status === 206) return { status: 0, pass: false };
+  if (probe.status === 200 && /^text\/html/i.test(probe.contentType ?? '')) return { status: 0, pass: false };
   return { status: probe.status, pass: probe.status === 200 };
+}
+
+/** 설치 파일 HEAD 판정 (본체 STEP4-1 과 동일 규칙) — 200/206 이라도 HTML 이면 파일이 아니다 */
+function judgeFileHead(status: number, contentType: string) {
+  if ((status === 200 || status === 206) && /^text\/html/i.test(contentType)) return { pass: false, needProbe: false };
+  if (status === 200 || status === 206) return { pass: true, needProbe: false };
+  return { pass: false, needProbe: true };
 }
 
 const B = 'https://ezlab.im';
@@ -126,6 +134,18 @@ test.describe('설치 파일 Range 프로브 판정', () => {
   });
   test('403 → 실패', () => {
     expect(judgeFileProbe({ status: 403, contentRange: '', bytes: 0, note: '' }).pass).toBe(false);
+  });
+  test('Range 무시 200 인데 text/html → 실패 (없는 파일에 오류·폴백 페이지)', () => {
+    expect(judgeFileProbe({ status: 200, contentRange: '', bytes: 0, note: '', contentType: 'text/html; charset=utf-8' }).pass).toBe(false);
+  });
+  test('HEAD 200 + application/octet-stream → 통과', () => {
+    expect(judgeFileHead(200, 'application/octet-stream')).toEqual({ pass: true, needProbe: false });
+  });
+  test('HEAD 200 + text/html → 실패, Range 재확인 없이 확정', () => {
+    expect(judgeFileHead(200, 'text/html')).toEqual({ pass: false, needProbe: false });
+  });
+  test('HEAD 405 → Range 로 재확인', () => {
+    expect(judgeFileHead(405, '')).toEqual({ pass: false, needProbe: true });
   });
 });
 

@@ -10,7 +10,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from notify_pipeline_failure import count_consecutive_failures, PRODUCTION_TITLE  # noqa: E402
+from notify_pipeline_failure import count_consecutive_failures, PRODUCTION_TITLE, should_send, REPEAT_EVERY  # noqa: E402
 
 failures = []
 
@@ -60,6 +60,13 @@ check('예전 schedule 런도 운영 런',
       count([run(1, 'failure'), run(2, 'failure', event='schedule', title='이지랩 헬스체크'), run(3, 'success', event='schedule', title='이지랩 헬스체크')]), 2)
 check('예전 main 수동 런(제목 구분 전)은 무시',
       count([run(1, 'failure'), run(8, 'success', title='이지랩 헬스체크'), run(2, 'failure'), run(3, 'success')]), 2)
+
+print('\n== 반복 알림 주기 ==')
+# n회째 실패 = 직전 연속 실패 n-1. 기본 6 이면 1·7·13회째 — 사이트 알림(UNKNOWN)과 같은 간격.
+if REPEAT_EVERY == 6:
+    check('1·7·13·19회째만 발송', [n for n in range(1, 21) if should_send(n - 1)], [1, 7, 13, 19])
+else:
+    print(f'  SKIP PIPELINE_ALERT_REPEAT={REPEAT_EVERY} — 기본값(6) 기준 케이스 생략')
 
 print()
 if failures:

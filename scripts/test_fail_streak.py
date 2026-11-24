@@ -106,6 +106,29 @@ check('새로 깨진 곳', new_fingerprints({A, B}, [{A}]), {B})
 check('같은 장애만 이어지면 없음', new_fingerprints({A}, [{A, B}]), set())
 check('직전 지문 모르면 없음(주기 따름)', new_fingerprints({A}, [set()]), set())
 check('이력 없으면 없음', new_fingerprints({A}, []), set())
+check('직전 기록이 상한에 잘렸으면 없음(주기 따름)', new_fingerprints({A, B}, [{A}], prev_truncated=True), set())
+
+print('\n== 직전 런 기록 잘림 감지 ==')
+from fail_streak import latest_history_truncated, HISTORY_RECORD_CAP  # noqa: E402
+
+
+def truncated(history):
+    with tempfile.TemporaryDirectory() as d:
+        hp = os.path.join(d, 'h.json')
+        with open(hp, 'w') as f:
+            json.dump(history, f)
+        return latest_history_truncated(CUR, hp)
+
+
+fail_rec = lambda i: {'fingerprint': f'ezlab.im/p{i}|HTTP_5XX'}  # noqa: E731  severity 없음 = FAIL
+warn_rec = {'fingerprint': 'ezlab.im/img|IMAGE', 'severity': 'WARN'}
+check('FAIL 20건 꽉 참 → 잘렸을 수 있음', truncated({P1: [fail_rec(i) for i in range(HISTORY_RECORD_CAP)]}), True)
+check('FAIL 19건 + WARN 1건 → FAIL 은 다 들어 있음',
+      truncated({P1: [fail_rec(i) for i in range(HISTORY_RECORD_CAP - 1)] + [warn_rec]}), False)
+check('FAIL 5건 → 잘리지 않음', truncated({P1: [fail_rec(i) for i in range(5)]}), False)
+check('현재 런 키는 건너뛰고 직전 런을 봄',
+      truncated({CUR: [fail_rec(i) for i in range(HISTORY_RECORD_CAP)], P1: [fail_rec(0)]}), False)
+check('이력 없음 → 잘림 아님', truncated({}), False)
 
 print()
 if failures:

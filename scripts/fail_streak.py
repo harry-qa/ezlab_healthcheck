@@ -60,6 +60,32 @@ def load_history_fingerprints(exclude_key, path=HISTORY_PATH):
     return out
 
 
+# 런마다 이력에 남는 기록 수 상한 — ezlab.spec.ts 의 failures.slice(0, 20) · update_failures.py 의 [:20] 과 같아야 한다.
+HISTORY_RECORD_CAP = 20
+
+
+def latest_history_truncated(exclude_key, path=HISTORY_PATH):
+    """직전 런의 FAIL 기록이 상한에 잘렸을 수 있는지.
+
+    기록은 FAIL → WARN → INFO 순으로 정렬돼 앞 20건만 남는다. 20건이 꽉 찼고 마지막이 FAIL 이면
+    그 뒤 FAIL 이 더 있었을 수 있다 — 그 런의 지문 집합은 불완전하다. 이걸 모르고 현재 런의
+    전체 지문과 비교하면 21번째 이후 지문이 매 런 '새로 깨진 곳'으로 잡혀 반복 억제가 풀린다.
+    """
+    try:
+        with open(path) as f:
+            hist = json.load(f)
+    except Exception:
+        return False
+    for k in sorted(hist, reverse=True):
+        if exclude_key and k == exclude_key:
+            continue
+        recs = hist.get(k) or []
+        return (len(recs) >= HISTORY_RECORD_CAP
+                and isinstance(recs[-1], dict)
+                and recs[-1].get('severity') not in ('WARN', 'INFO'))
+    return False
+
+
 def count_streak(cur_status, recent):
     """상태 문자열만으로 세는 연속 FAIL 횟수(현재 런 포함)."""
     if cur_status != 'FAIL':
@@ -107,12 +133,12 @@ def should_repeat(streak, first, every):
     return streak >= first and (streak - first) % max(1, every) == 0
 
 
-def new_fingerprints(cur_fps, history_fps):
+def new_fingerprints(cur_fps, history_fps, prev_truncated=False):
     """직전 런에 없던 장애 지문 — 장애가 이어지는 중에 새로 깨진 곳. 반복 억제와 무관하게 바로 알린다.
 
-    직전 런의 지문을 모르면(이력 없음·지문 없는 과거 기록) 빈 집합 — 억제 주기를 따른다.
+    직전 런의 지문을 모르면(이력 없음·지문 없는 과거 기록·상한에 잘린 기록) 빈 집합 — 억제 주기를 따른다.
     """
-    if not history_fps or not history_fps[0]:
+    if prev_truncated or not history_fps or not history_fps[0]:
         return set()
     return set(cur_fps) - history_fps[0]
 

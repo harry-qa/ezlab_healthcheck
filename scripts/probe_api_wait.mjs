@@ -21,6 +21,8 @@ const IDLE_TIMEOUT_MS = 8000;      // 현재 코드와 동일
 const SETTLE_MS = 2000;            // 현재 코드와 동일
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+// 아래 두 정규식은 tests/ezlab.spec.ts 의 OWN_HOST_RE·BEACON_RE 와 같아야 한다(본체를 고치면 여기도 고친다).
+// 이 스크립트는 .mjs 단독 실행이라 TS 본체를 import 하지 않는다.
 const OWN_HOST_RE = /^(([a-z0-9-]+\.)*ezlab\.im|([a-z0-9-]+\.)*ezdown\.kr)$/i;
 const BEACON_RE = /(google-analytics\.com|analytics\.google\.com|\/g\/collect|\/collect\?|\/ccm\/collect|doubleclick\.net|googlesyndication\.com\/pagead|googleads\.g\.doubleclick|onetag\.co\.kr\/(log|collect|track))/i;
 
@@ -31,6 +33,8 @@ const outPath = process.argv[2] ?? `probe-${policy}.json`;
 const results = [];
 
 const browser = await chromium.launch();
+// 중간에 예외가 나도 브라우저를 닫는다 — 예전엔 close 가 맨 끝에만 있어 예외 시 프로세스가 남았다.
+try {
 const ctx = await browser.newContext({ userAgent: UA });
 const page = await ctx.newPage();
 
@@ -99,8 +103,10 @@ for (const lang of LANGS) {
   console.log(`[${policy}/${lang}] 대기종료 ${waitEndMs}ms(${idleOutcome}) · `
     + `요청 ${atWait.length}→+${extra.length} · 엔드포인트 ${setWait.size}→${setAll.size} · 신규 ${newEndpoints.length}`);
 }
+} finally {
+  await browser.close();
+}
 
-await browser.close();
 const fs = await import('fs');
 fs.writeFileSync(outPath, JSON.stringify({ policy, observeMs: OBSERVE_MS, results }, null, 2));
 console.log(`저장: ${outPath}`);

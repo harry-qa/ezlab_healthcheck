@@ -87,19 +87,24 @@ function probeFileRange(
 
 // SSL 인증서 만료일까지 남은 일수를 잰다. TLS 핸드셰이크로 서버 인증서만 읽고 즉시 끊는다.
 // 만료되면 전 서비스가 한 번에 죽으므로, 만료 전에 미리 경고(WARN)/장애(FAIL)로 띄우기 위함.
+// 검증 실패 인증서도 끝까지 읽는다(rejectUnauthorized:false). 기본값(true)이면 만료·호스트 불일치
+// 인증서는 핸드셰이크가 오류로 끝나 만료일을 못 읽고, STEP 9 가 '확인 실패' WARN 으로만 남겼다 —
+// 정작 이 STEP 이 잡아야 할 '만료됨' 이 FAIL 로 안 떴다. 신뢰 여부는 authorizationError 로 따로 돌려준다.
+// 연결 자체(DNS·TCP·타임아웃)가 안 되는 경우만 reject 한다.
 function checkCertExpiry(
   host: string,
   port = 443,
   timeoutMs = 10000,
-): Promise<{ daysLeft: number; validTo: string }> {
+): Promise<{ daysLeft: number; validTo: string; authError: string }> {
   return new Promise((resolve, reject) => {
-    const socket = tls.connect({ host, port, servername: host, timeout: timeoutMs }, () => {
+    const socket = tls.connect({ host, port, servername: host, timeout: timeoutMs, rejectUnauthorized: false }, () => {
       const cert = socket.getPeerCertificate();
+      const authError = socket.authorized ? '' : String(socket.authorizationError ?? '검증 실패');
       socket.end();
       if (!cert || !cert.valid_to) { reject(new Error('인증서 정보 없음')); return; }
       const validTo  = new Date(cert.valid_to);
       const daysLeft = Math.floor((validTo.getTime() - Date.now()) / 86400000);
-      resolve({ daysLeft, validTo: cert.valid_to });
+      resolve({ daysLeft, validTo: cert.valid_to, authError });
     });
     socket.on('error', reject);
     socket.on('timeout', () => { socket.destroy(); reject(new Error('timeout')); });
@@ -522,7 +527,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
       attempts = attempt;
       const startTime = Date.now();
       try {
-        const res = await page.request.get(url, { headers, timeout: REQUEST_TIMEOUT_MS });
+        const res = await page.request.get(url, { headers: headersFor(url), timeout: REQUEST_TIMEOUT_MS });
         lastStatus = res.status();
         lastResponseTime = Date.now() - startTime;
         if (apiIsOk(lastStatus, url, 'GET')) {
@@ -727,7 +732,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
         const startTime = Date.now();
         let threwErr: unknown = null;
         try {
-          res = await page.request.get(requestUrl, { headers, timeout: REQUEST_TIMEOUT_MS });
+          res = await page.request.get(requestUrl, { headers: headersFor(requestUrl), timeout: REQUEST_TIMEOUT_MS });
           responseTime = Date.now() - startTime;
           if (res.status() === 200 || attempt >= maxAttempts) break; // 성공 또는 마지막 시도 → 아래에서 판정
           failureLog.push(`${attempt}회차 HTTP ${res.status()} (${responseTime}ms)`);
@@ -896,7 +901,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
             // (예전엔 워밍업 예외가 catch로 떨어져 그 언어 전체가 FAIL 났다 — 워밍업은 연결 캐시가
             //  목적이라 결과 자체가 판정 근거가 아니다)
             let warmupFailed = false;
-            try { await measureTTFB(serverUrl, headers, agent); }
+            try { await measureTTFB(serverUrl, headersFor(serverUrl), agent); }
             catch { warmupFailed = true; console.log(`[INFO][${lang}] 워밍업 실패 — 판정 제외, 본측정 결과로 판단`); }
 
             // 본측정 3회 — 5xx·응답없음 샘플만 2초 후 1회 재측정한다(4xx는 즉시 확정).
@@ -910,7 +915,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
             let retrySkipped: 'budget' | undefined;
             for (let i = 0; i < 3; i++) {
               let r: { status: number; ttfb: number };
-              try { r = await measureTTFB(serverUrl, headers, agent); }
+              try { r = await measureTTFB(serverUrl, headersFor(serverUrl), agent); }
               catch { r = { status: 0, ttfb: 0 }; } // 예외는 응답없음(0) 샘플로 수렴 — 재시도 판정 일원화
               if (!alive(r.status) && shouldRetryStatus(r.status, { url: serverUrl, responseTimeMs: r.ttfb })) {
                 sampleLog.push(`${i + 1}차 ${r.status === 0 ? '응답 없음' : `HTTP ${r.status}`}`);
@@ -921,7 +926,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
                 } else {
                   await page.waitForTimeout(delay);
                   try {
-                    const r2 = await measureTTFB(serverUrl, headers, agent);
+                    const r2 = await measureTTFB(serverUrl, headersFor(serverUrl), agent);
                     if (alive(r2.status)) sampleRecovered = true;
                     r = r2;
                   } catch { r = { status: 0, ttfb: 0 }; }
@@ -1514,6 +1519,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
               }
             }
           }
+          const netFailureCount = netFailures.length; // 아래 로그용 — 비우기 전에 세어 둔다
           netFailures.length = 0; // finally 에서 중복 반영되지 않도록 비운다
 
           // 1층: OG / Twitter 메타 이미지 — DOM <img>에 안 잡혀 기존 검사가 통째로 놓치던 경로.
@@ -1551,7 +1557,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
 
           // 3층: DOM <img src> — 네트워크로 요청되지 않은 지연 로딩 이미지 보완.
           const images = await page.locator('img').all();
-          console.log(`[INFO][${lang}] DOM 이미지 ${images.length}개 · 메타 이미지 ${metaImgs.length}개 · 네트워크 실패 ${netFailures.length}건`);
+          console.log(`[INFO][${lang}] DOM 이미지 ${images.length}개 · 메타 이미지 ${metaImgs.length}개 · 네트워크 실패 ${netFailureCount}건`);
           const domReadErrors: string[] = [];
           let domReadFailureCount = 0;
           let domImagesUnverified = 0;
@@ -1710,6 +1716,16 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
         result.note,
       ].filter(Boolean).join(' · '));
       console.log(`[WARN][이미지] ${first.status} ${assetUrl} — ${symptom} @ ${ts}`);
+      // STEP5 에서 미리 찍어 둔 화면은 'DOM 요청의 상태'로 지문을 만들었다. 이 기록은 failed[0] 의 상태를
+      // 쓰므로(네트워크 관측 504 와 DOM 404 처럼) 오류 계열이 다르면 지문이 어긋나 화면 대신 진단 카드가 붙었다.
+      // → 실패한 요청들의 지문 중 화면이 걸린 것이 있으면 이 기록의 지문에도 연결해 둔다.
+      const recFp = fingerprintOf({ step: 'STEP6·이미지', type: '이미지', lang: '-', url: assetUrl, status: first.status, responseTime: 0, symptom, timestamp: ts });
+      if (!evidenceByFingerprint.has(recFp)) {
+        const stashed = failed
+          .map(([, r]) => evidenceByFingerprint.get(fingerprintOf({ step: 'STEP6·이미지', type: '이미지', lang: '-', url: assetUrl, status: r.status, responseTime: 0, symptom: '', timestamp: ts })))
+          .find(Boolean);
+        if (stashed) evidenceByFingerprint.set(recFp, stashed);
+      }
       await recordIssue({
         step: 'STEP6·이미지', type: '이미지', lang: [...o.langs].join(',') || '-',
         url: assetUrl, status: first.status, responseTime: 0, symptom, timestamp: ts, severity: 'WARN',
@@ -1775,8 +1791,11 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
             // 셀렉터를 넓히고 최대 4초까지 등장을 대기한 뒤 판정한다.
             // 기대 문구의 공백은 있어도 없어도 맞춘다 — 'Google でログイン'↔'Googleでログイン' 같은 공백 한 칸 차이로 오탐 나지 않게.
             const escaped = btn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s*');
+            // 화면에 보이는 요소만 센다 — DOM 에만 남고 숨겨진 버튼(display:none·CSS 깨짐)은 사용자가 누를 수 없다.
+            // 예전엔 visible 대기 실패를 버리고 숨은 요소까지 센 count 로 판정해 이런 경우가 PASS 로 지나갔다.
             const loc = page.locator('button, a, [role="button"], [class*="btn" i]')
-              .filter({ hasText: new RegExp(escaped, 'i') });
+              .filter({ hasText: new RegExp(escaped, 'i') })
+              .filter({ visible: true });
             try {
               await loc.first().waitFor({ state: 'visible', timeout: 4000 });
             } catch { /* 최종 판정은 아래 count로 */ }
@@ -1919,34 +1938,38 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
             const { fetchUrl, displayUrl } = normalizeImageUrl(src, ezdownBase);
             if (checkedImageUrls.has(fetchUrl)) continue;
             checkedImageUrls.add(fetchUrl);
-            // 상태 조회 1회 — 예외(타임아웃·접속 불가)는 status 0으로 수렴시켜 재시도 판정을 일원화한다.
-            const getImgStatus = async () => {
-              try { return (await page.request.get(fetchUrl, { headers, timeout: 8000 })).status(); }
-              catch { return 0; }
-            };
-            let st = await getImgStatus();
-            const firstSt = st;
+            // STEP 6 과 같은 판정(fetchImageOnce)을 쓴다 — 상태 코드만 보면 CDN 이 없는 파일에
+            // 200 + HTML 오류 페이지를 줄 때 깨진 이미지가 PASS 로 지나갔다. Content-Type·본문 크기까지 본다.
+            let img1 = await fetchImageOnce(fetchUrl, 'ezdown');
+            const first = img1;
             let imgRetrySkipped: 'budget' | undefined;
-            // 5xx·응답없음(0)만 2초 후 1회 재시도 — 4xx는 즉시 확정 (STEP6 능동 검증과 동일 정책).
-            if (st !== 200 && shouldRetryStatus(st, { url: fetchUrl })) {
+            // 5xx·응답없음(0)만 2초 후 1회 재시도 — 4xx·타입 이상은 즉시 확정 (STEP6 능동 검증과 동일 정책).
+            if (!img1.ok && shouldRetryStatus(img1.status, { url: fetchUrl })) {
               const delay = retryDelayMs(1);
               if (!retryBudgetOk(delay, 8000)) {
                 imgRetrySkipped = 'budget';
               } else {
                 await page.waitForTimeout(delay);
-                st = await getImgStatus();
-                if (st === 200) {
-                  intermittentRecoveries.push({ step: 'STEP8·이지다운이미지', type: '이미지', lang, url: displayUrl, status: 200, responseTime: 0, symptom: `이미지 간헐 실패 후 재시도 회복 (최초 ${firstSt === 0 ? '응답 없음' : `HTTP ${firstSt}`})`, timestamp: kstNow(), severity: 'INFO' });
+                img1 = await fetchImageOnce(fetchUrl, 'ezdown');
+                if (img1.ok) {
+                  intermittentRecoveries.push({ step: 'STEP8·이지다운이미지', type: '이미지', lang, url: displayUrl, status: img1.status, responseTime: 0, symptom: `이미지 간헐 실패 후 재시도 회복 (최초 ${first.status === 0 ? '응답 없음' : `HTTP ${first.status}`})`, timestamp: kstNow(), severity: 'INFO' });
                 }
               }
             }
-            if (st !== 200) {
+            if (!img1.ok) {
               warnCount++;
               const ts = kstNow();
+              const st = img1.status;
               const suffix = imgRetrySkipped ? ' · 재시도 생략(예산 부족)' : '';
-              const symptom = st === 0 ? `이미지 접근 불가 / 타임아웃${suffix}` : `이미지 로드 실패 (${st})${suffix}`;
-              console.log(`[WARN][이지다운][이미지][${lang}] ${st === 0 ? '접근 불가' : st} ${displayUrl}`);
-              await recordIssue({ step: 'STEP8·이지다운이미지', type: '이미지', lang, url: displayUrl, status: st, responseTime: 0, symptom, timestamp: ts, severity: 'WARN', retrySkipped: imgRetrySkipped }, { visual: true, locator: img, label: `경고_이지다운깨진이미지_${lang}` });
+              const symptom = st === 0
+                ? `이미지 접근 불가 / 타임아웃${suffix}`
+                : `이미지 로드 실패 (HTTP ${st})${img1.note ? ` · ${img1.note}` : ''}${suffix}`;
+              console.log(`[WARN][이지다운][이미지][${lang}] ${st === 0 ? '접근 불가' : st}${img1.note ? ` (${img1.note})` : ''} ${displayUrl}`);
+              await recordIssue({
+                step: 'STEP8·이지다운이미지', type: '이미지', lang, url: displayUrl, status: st, responseTime: 0, symptom, timestamp: ts, severity: 'WARN', retrySkipped: imgRetrySkipped,
+                contentType: img1.contentType || undefined, netError: img1.netError,
+                responseHeaders: img1.responseHeaders, responseBodySnippet: img1.responseBodySnippet, responseBodyBytes: img1.responseBodyBytes,
+              }, { visual: true, locator: img, label: `경고_이지다운깨진이미지_${lang}` });
             }
           }
           if (domReadErrors.length > 0) {
@@ -1995,7 +2018,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
         // 재시도는 '순수 연결 타임아웃'에만 1회 — 만료·호스트 불일치·검증 실패는 재시도로
         // 달라지지 않는 확정 상태라 즉시 판정한다(재시도하면 진짜 만료 신호만 늦게 뜬다).
         const isConnTimeout = (m: string) => /^timeout$|ETIMEDOUT/i.test(m);
-        let certInfo: { daysLeft: number; validTo: string } | null = null;
+        let certInfo: { daysLeft: number; validTo: string; authError: string } | null = null;
         let lastMsg = '';
         let certAttempts = 1;
         let certRetrySkipped: 'budget' | undefined;
@@ -2028,17 +2051,21 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
           intermittentRecoveries.push({ step: 'STEP9·인증서', type: '인증서', lang: '-', url: `https://${host}`, status: 200, responseTime: 0, symptom: '연결 타임아웃 후 재시도 회복', timestamp: kstNow(), severity: 'INFO' });
         }
         {
-          const { daysLeft, validTo } = certInfo;
-          if (daysLeft < 0 || daysLeft <= CERT_FAIL_DAYS) {
+          const { daysLeft, validTo, authError } = certInfo;
+          // 만료 외의 검증 실패(호스트 불일치·체인 불완전·자체 서명)도 브라우저가 접속을 막으므로 FAIL.
+          if (daysLeft < 0 || daysLeft <= CERT_FAIL_DAYS || authError) {
             failCount++;
             const ts = kstNow();
             const symptom = daysLeft < 0
               ? `SSL 인증서 만료됨 (만료일 ${validTo})`
-              : `SSL 인증서 만료 임박 D-${daysLeft} (만료일 ${validTo}) — 자동갱신 확인 필요`;
+              : authError
+                ? `SSL 인증서 검증 실패: ${authError} (만료일 ${validTo}, D-${daysLeft})`
+                : `SSL 인증서 만료 임박 D-${daysLeft} (만료일 ${validTo}) — 자동갱신 확인 필요`;
             console.log(`[FAIL][인증서][${host}] ${symptom} @ ${ts}`);
             await recordIssue({ step: 'STEP9·인증서', type: '인증서', lang: '-', url: `https://${host}`, status: 0, responseTime: 0, symptom, timestamp: ts });
             certResults.push({ host, daysLeft, validTo: fmtValid(validTo), status: 'FAIL' });
-            expect.soft(daysLeft, `[인증서][${host}] ${symptom}`).toBeGreaterThan(CERT_FAIL_DAYS);
+            // 리포트 판정과 같은 기준으로 단언한다 — daysLeft 만 보면 검증 실패(D-60 등)가 CI 에서 통과해 버린다.
+            expect.soft(daysLeft > CERT_FAIL_DAYS && !authError, `[인증서][${host}] ${symptom}`).toBe(true);
           } else if (daysLeft <= CERT_WARN_DAYS) {
             warnCount++;
             const ts = kstNow();
@@ -2116,12 +2143,18 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
       let fileRetrySkipped: 'budget' | undefined;
       try {
         // HEAD는 본문을 받지 않아 안전하다 — 1차로 여기서 판정한다.
-        const head = await page.request.head(fileUrl, { headers: ownHeaders, timeout: 8000 });
+        const head = await page.request.head(fileUrl, { headers: headersFor(fileUrl), timeout: 8000 });
         status = head.status();
-        if (status !== 200 && status !== 206) {
+        // 설치 파일 주소가 200 + text/html 이면 CDN·웹서버가 없는 파일에 오류/폴백 페이지를 준 것이다
+        // (영상 검사 STEP 4-2 와 같은 기준). 파일이 있는 것으로 보면 안 된다.
+        const headType = String(head.headers()['content-type'] ?? '');
+        if ((status === 200 || status === 206) && /^text\/html/i.test(headType)) {
+          note = `파일이 아닌 응답 (HTTP ${status}, Content-Type: ${headType})`;
+          status = 0;
+        } else if (status !== 200 && status !== 206) {
           // HEAD를 막는 CDN(405/403)일 수 있어 Range로 재확인한다. 본문 버퍼링을 피하려고
           // page.request.get이 아니라 스트리밍 프로브를 쓴다(206 아니면 헤더 시점에 연결 파기).
-          let probe = await probeFileRange(fileUrl, ownHeaders);
+          let probe = await probeFileRange(fileUrl, headersFor(fileUrl));
           // Range 프로브에 한해 5xx·응답없음(0)만 2초 후 1회 재시도 — 4xx(권한·존재)는 즉시 확정.
           if (probe.status === 0 || probe.status >= 500) {
             const delay = retryDelayMs(1);
@@ -2131,7 +2164,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
             } else {
               await page.waitForTimeout(delay);
               const firstProbe = probe;
-              probe = await probeFileRange(fileUrl, ownHeaders);
+              probe = await probeFileRange(fileUrl, headersFor(fileUrl));
               if (probe.status === 206 || probe.status === 200) {
                 intermittentRecoveries.push({ step: 'STEP4-1·파일URL', type: '파일', lang: '-', url: fileUrl, status: probe.status, responseTime: 0, symptom: `파일 Range 간헐 실패 후 재시도 회복 (최초 ${firstProbe.status === 0 ? '응답 없음' : `HTTP ${firstProbe.status}`})`, timestamp: kstNow(), severity: 'INFO' });
               }
@@ -2148,6 +2181,9 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
             status = 0;
             note = !rangeOk ? `Content-Range 형식 이상: "${probe.contentRange || '(없음)'}"`
                             : `206이지만 수신 바이트 ${probe.bytes} (1바이트 기대)`;
+          } else if (probe.status === 200 && /^text\/html/i.test(probe.contentType)) {
+            status = 0;
+            note = `파일이 아닌 응답 (HTTP 200, Content-Type: ${probe.contentType})`;
           } else {
             status = probe.status;
             note = probe.note;
@@ -2221,12 +2257,17 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
           let hasDownloadLink = false;
           if (status === 200) await collectVideoRefs(tlang, target.url);
           if (status === 200 && !mobilePolicy) {
-            const dlLinks = await page.locator('a[href*=".exe"], a[href*=".apk"], a[href*=".zip"], a[href*="download"]').all();
+            // 상단 메뉴(nav)에도 '다운로드' 버튼이 2개 있다(2026-11-24 실측, 전 도구 페이지 공통). 이걸 세면
+            // 본문 다운로드 CTA 가 사라져도 늘 통과한다 → header·nav·footer 안의 요소는 빼고 본문만 센다.
+            const outsideChrome = (els: Element[]) => els.filter(e => !e.closest('header, nav, footer')).length;
+            const dlLinks = await page.locator('a[href*=".exe"], a[href*=".apk"], a[href*=".zip"], a[href*="download"]')
+              .evaluateAll(outsideChrome);
             // 다운로드 CTA가 언어별로 <button>/<a>가 아니라 btn-class <div> 등으로 렌더되는 경우가 있어
             // (ko는 <button>, en/jp/tw는 다른 요소) 요소 종류를 넓히고 텍스트를 정규식으로 매칭 — 오탐 방지.
             const dlButtons = await page.locator('button, a, [role="button"], [class*="btn" i], [class*="download" i]')
-              .filter({ hasText: /다운로드|download|ダウンロード|下載/i }).all();
-            hasDownloadLink = dlLinks.length > 0 || dlButtons.length > 0;
+              .filter({ hasText: /다운로드|download|ダウンロード|下載/i })
+              .evaluateAll(outsideChrome);
+            hasDownloadLink = dlLinks > 0 || dlButtons > 0;
           }
 
           if (status !== 200) {
@@ -2281,7 +2322,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
     type VideoProbe = { ok: boolean; status: number; contentType: string; contentRange: string; reason: string; retrySkipped?: 'budget'; recovered?: string };
     const probeVideo = async (videoUrl: string): Promise<VideoProbe> => {
       // 식별 헤더는 자사 도메인에만 싣는다(제3자 서버 로그에 CI 존재를 남기지 않는다).
-      const reqHeaders = isOwnHost(videoUrl) ? ownHeaders : headers;
+      const reqHeaders = headersFor(videoUrl);
       let retrySkipped: 'budget' | undefined;
       let recovered: string | undefined;
       let probe = await probeFileRange(videoUrl, reqHeaders);

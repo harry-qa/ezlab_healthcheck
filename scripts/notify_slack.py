@@ -125,7 +125,7 @@ for s in recent:
 from fail_streak import effective_streak as _eff_streak
 from fail_streak import previous_effective_streak as _prev_eff_streak
 from fail_streak import (should_repeat, new_fingerprints, load_current_fingerprints,
-                         load_history_fingerprints)
+                         load_history_fingerprints, latest_history_truncated)
 
 _eff, fp_streak, _cnt = _eff_streak(cur, recent, _dt)
 
@@ -143,7 +143,9 @@ if is_unknown:
             unknown_streak += 1
         else:
             break
-added_fps = (new_fingerprints(load_current_fingerprints(), load_history_fingerprints(_dt))
+# 직전 런 기록이 20건 상한에 잘렸으면 비교하지 않는다 — 큰 장애에서 매 런 '새로 깨진 곳'으로 오판해 반복 억제가 풀렸다.
+added_fps = (new_fingerprints(load_current_fingerprints(), load_history_fingerprints(_dt),
+                              prev_truncated=latest_history_truncated(_dt))
              if is_fail and effective_streak > THRESHOLD else set())
 # UNKNOWN은 1회부터, FAIL은 연속 FAIL THRESHOLD회부터 알림(그 뒤로는 반복 주기 또는 새로 깨진 곳이 있을 때)
 down_alert  = ((is_unknown and should_repeat(unknown_streak, 1, REPEAT))
