@@ -1728,13 +1728,15 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
   // ══════════════════════════════════════════════════════════════════
   // STEP 7: 로그인 폼 렌더링 확인
   // ══════════════════════════════════════════════════════════════════
-  // ko: 카카오, 네이버, 구글, 이메일로 로그인, 계정찾기
-  // en/jp/tw: 구글, 이메일로 시작하기, 계정찾기
+  // ko: 카카오, 네이버, Google, Apple, 이메일로 시작하기
+  // en/jp/tw: Google, Apple, 이메일로 시작하기
+  // 문구는 로그인 개편 2.3.0(2026-11-23 운영 배포) 화면 기준. 언어별 번역 문구 그대로 둬서
+  // 다른 언어 화면이 뜨는 것도 잡는다. 기대 문구의 공백은 아래 매칭에서 선택으로 본다.
   const loginChecks: { lang: string; buttons: string[] }[] = [
-    { lang: 'ko', buttons: ['카카오', '네이버', '구글', '이메일'] },
-    { lang: 'en', buttons: ['Login with Google', 'Start with email'] },
-    { lang: 'jp', buttons: ['Googleでログイン', 'メールで始める'] },
-    { lang: 'tw', buttons: ['使用 Google 登入', '使用電子郵件開始'] },
+    { lang: 'ko', buttons: ['카카오', '네이버', 'Google로 로그인', 'Apple로 로그인', '이메일'] },
+    { lang: 'en', buttons: ['Sign in with Google', 'Sign in with Apple', 'Start with email'] },
+    { lang: 'jp', buttons: ['Google でログイン', 'Appleでサインイン', 'メールで始める'] },
+    { lang: 'tw', buttons: ['使用 Google 帳戶登入', '使用 Apple 登入', '使用電子郵件開始'] },
   ];
 
   stepMark('STEP 7');
@@ -1771,7 +1773,8 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
             // 버튼이 <button>/<a>가 아니라 [role=button]·btn-class <div>로 렌더되거나,
             // 하이드레이션 직후 SSR 콘텐츠가 잠깐 스켈레톤으로 교체되는 타이밍 오탐을 막기 위해
             // 셀렉터를 넓히고 최대 4초까지 등장을 대기한 뒤 판정한다.
-            const escaped = btn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            // 기대 문구의 공백은 있어도 없어도 맞춘다 — 'Google でログイン'↔'Googleでログイン' 같은 공백 한 칸 차이로 오탐 나지 않게.
+            const escaped = btn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s*');
             const loc = page.locator('button, a, [role="button"], [class*="btn" i]')
               .filter({ hasText: new RegExp(escaped, 'i') });
             try {
