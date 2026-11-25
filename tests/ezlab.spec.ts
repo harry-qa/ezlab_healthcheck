@@ -2223,7 +2223,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
     }));
     console.log(`[INFO] STEP 4 대상 서비스 페이지 ${toolTargets.length}개 자동 수집: ${toolTargets.map(t => t.name).join(', ')}`);
     for (const target of toolTargets) {
-      // 4개 언어 확장으로 대상이 최대 24개 — 사이트가 느린 날 전체 타임아웃(10분)을 넘겨
+      // 도구 8개 × 4개 언어로 대상이 32개(2026-11 기준) — 사이트가 느린 날 전체 타임아웃(10분)을 넘겨
       // 최종 리포트 저장이 날아가지 않도록, 안전 시점 이후엔 남은 항목을 스킵한다.
       if (budgetHit('STEP4·다운로드')) {
         step4Stats.skipped = toolTargets.length - step4Stats.verified;
@@ -2242,7 +2242,7 @@ test('이지랩 서비스 통합 점검 (서버 / API / UI)', async ({ page }) =
 
           // 재시도로 회복된 항목(간헐)은 페이지가 살아있으므로 즉시 WARN을 매기지 않는다.
           // STEP 3(checkUrl)은 같은 상황을 PASS + 메모로 처리하는데 여기만 WARN이면 판정이 어긋나고,
-          // 무엇보다 대상이 20여 개라 건당 1%대 확률만으로도 런 5개 중 1개가 노란불이 된다.
+          // 무엇보다 대상이 30여 개라 건당 1%대 확률만으로도 런 3~4개 중 1개가 노란불이 된다.
           // → 일단 모아두고, 한 런에 임계치 이상 몰릴 때만 아래 '간헐 회복 종합 판정'에서 WARN 승격.
           if (status === 200 && nav.recovered) {
             const ts = kstNow();
